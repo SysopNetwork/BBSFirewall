@@ -1,0 +1,20 @@
+# BBS Firewall - IP Blocklist
+#
+# IPs listed here are permanently blocked from connecting.
+# This is separate from the temporary blocks applied by rate limiting.
+#
+# One entry per line. Lines starting with # are comments.
+# Supports single IPs and CIDR ranges.
+#
+# Examples:
+#   192.168.1.100
+#   10.0.0.0/24
+#   2001:db8::1
+#
+# To use this file:
+# 1. Copy to blocklist.txt
+# 2. Add the IPs/ranges to block
+# 3. Set BLOCKLIST_PATH=./blocklist.txt in your .env file
+
+# 203.0.113.0
+# 198.51.100.0

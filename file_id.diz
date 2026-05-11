@@ -1,0 +1,18 @@
+
+   ___/<______________________>\_
+   \______       __________   ___/
+,-- //   /  //   _/_//    / / _/ --,
+|  /    /   \   /   \    / /   \   |
+| /____     /__     /___/-/    /   |
+`---- /____/- /____/---- /____/ ---'
+,----------------------------------,
+| bbs firewall! protect yer ports! |
+|                                  |
+| bbsfirewall v1.0.0               |
+| tcp proxy firewall for bbs       |
+| telnet connections. geo/ip       |
+| country blocking, rate limit,    |
+| per-ip connection limits, web    |
+| redirect, and full passthru.     |
+|                                  |
+`----[ sysop network ]-------------'

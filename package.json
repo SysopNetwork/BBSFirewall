@@ -1,0 +1,29 @@
+{
+  "name": "bbsfirewall",
+  "version": "1.0.0",
+  "description": "BBS Firewall - TCP proxy firewall for BBS telnet connections",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "setup-geoip": "node download-geoip.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "maxmind": "^4.3.0",
+    "ssh2": "^1.17.0"
+  },
+  "keywords": [
+    "firewall",
+    "telnet",
+    "proxy",
+    "bbs",
+    "tcp",
+    "sysop"
+  ],
+  "author": "Sysop Network",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

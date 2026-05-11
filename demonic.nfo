@@ -1,0 +1,29 @@
+
+-------------------------------------------------------------------------------
+ [ bbs firewall ]
+-------------------------------------------------------------------------------
+* bbsfirewall v1.0.0
+* by sysop network
+* https://github.com/SysopNetwork/BBSFirewall
+
+-------------------------------------------------------------------------------
+ [ description ]
+-------------------------------------------------------------------------------
+* lightweight tcp proxy firewall for bbs telnet connections
+* runs anywhere node.js runs!
+
+* features:
+*   - per-ip concurrent connection limiting
+*   - http redirect server (port 80)
+*   - geo/ip country blocking (maxmind geolite2)
+*   - ip whitelist and blocklist (supports cidr)
+*   - rate limiting / flood protection
+*   - optional ssh server with legacy cipher support
+*   - utf-8 / cp437 encoding detection and routing
+
+-------------------------------------------------------------------------------
+ [ documentation ]
+-------------------------------------------------------------------------------
+* see README.md for full documentation and setup instructions
+
+-------------------------------------------------------------------------------

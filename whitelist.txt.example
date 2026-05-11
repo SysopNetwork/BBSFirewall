@@ -1,0 +1,21 @@
+# BBS Firewall - IP Whitelist
+#
+# IPs listed here bypass ALL firewall rules including country blocking,
+# rate limiting, and the blocklist. Use this for trusted IPs only.
+#
+# One entry per line. Lines starting with # are comments.
+# Supports single IPs and CIDR ranges.
+#
+# Examples:
+#   192.168.1.100
+#   10.0.0.0/8
+#   172.16.0.0/12
+#   2001:db8::1
+#
+# To use this file:
+# 1. Copy to whitelist.txt
+# 2. Add your trusted IPs/ranges
+# 3. Set WHITELIST_PATH=./whitelist.txt in your .env file
+
+# 192.168.1.100
+# 10.0.0.0/8

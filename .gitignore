@@ -1,0 +1,34 @@
+# Environment variables
+.env
+
+# Node modules
+node_modules/
+
+# GeoIP database
+data/
+
+# IP lists (keep examples, ignore actual files)
+blocklist.txt
+whitelist.txt
+
+# SSH host key
+ssh_host_key
+ssh_host_key.pub
+
+# Logs
+*.log
+logs/
+
+# Local tool configuration
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
