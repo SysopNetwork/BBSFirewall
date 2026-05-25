@@ -273,7 +273,7 @@ PROXY_PROTOCOL_ENABLED=true
 When enabled, every connection to the backend starts with:
 
 ```
-PROXY TCP4 203.0.113.45 70.36.125.4 56324 23
+PROXY TCP4 203.0.113.45 192.0.2.1 56324 23
 ```
 
 Fields: `protocol`, `real client IP`, `proxy IP`, `client port`, `proxy port`.
