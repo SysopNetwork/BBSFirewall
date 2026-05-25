@@ -1,30 +1,48 @@
-# BBSFirewall
+<div align="center">
 
-A lightweight TCP proxy firewall for BBS telnet connections, built with Node.js.
+```
+  ██████╗ ██████╗ ███████╗    ███████╗██╗██████╗ ███████╗██╗    ██╗ █████╗ ██╗     ██╗
+  ██╔══██╗██╔══██╗██╔════╝    ██╔════╝██║██╔══██╗██╔════╝██║    ██║██╔══██╗██║     ██║
+  ██████╔╝██████╔╝███████╗    █████╗  ██║██████╔╝█████╗  ██║ █╗ ██║███████║██║     ██║
+  ██╔══██╗██╔══██╗╚════██║    ██╔══╝  ██║██╔══██╗██╔══╝  ██║███╗██║██╔══██║██║     ██║
+  ██████╔╝██████╔╝███████║    ██║     ██║██║  ██║███████╗╚███╔███╔╝██║  ██║███████╗███████╗
+  ╚═════╝ ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝
+```
 
-**By Sysop Network** — https://github.com/SysopNetwork/BBSFirewall
+**A lightweight TCP proxy firewall for BBS telnet connections, built with Node.js.**
 
----
+By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/SysopNetwork/BBSFirewall
 
-## Features
+[![Node.js](https://img.shields.io/badge/Node.js-14%2B-brightgreen?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue?logo=opensourceinitiative&logoColor=white)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?logo=linux&logoColor=white)]()
+[![PM2](https://img.shields.io/badge/PM2-ready-2B037A?logo=pm2&logoColor=white)](https://pm2.keymetrics.io/)
 
-- **TCP Proxy** — Forwards telnet connections to a backend BBS server
-- **SSH Server** — Encrypted SSH access on any port, proxied to the telnet backend
-- **HTTPS Redirect** — Redirects both HTTP (port 80) and HTTPS (port 443) to a configured URL
-- **Let's Encrypt** — Built-in cert setup script with auto-renewal, no downtime required
-- **PROXY Protocol v1** — Passes the real client IP to the backend BBS (requires compatible backend)
-- **Country Blocking** — Block connections by country using a local GeoIP database
-- **IP Whitelist** — Trusted IPs that bypass all firewall rules
-- **IP Blocklist** — Permanently block specific IPs or CIDR ranges
-- **Rate Limiting** — Automatic flood protection with configurable temporary blocks
-- **Per-IP Connection Limit** — Cap simultaneous connections from a single IP
-- **Encoding Detection** — Automatic UTF-8/CP437 detection with separate backend routing
-- **Graceful Shutdown** — Clean shutdown on SIGTERM/SIGINT, active sessions drain properly
-- **PM2 Ready** — Includes `ecosystem.config.js` for process management
+</div>
 
 ---
 
-## Installation
+## ✨ Features
+
+| | Feature | Description |
+|---|---|---|
+| 🔀 | **TCP Proxy** | Forwards telnet connections to a backend BBS server |
+| 🔒 | **SSH Server** | Encrypted SSH access on any port, proxied to the telnet backend |
+| 🌐 | **HTTPS Redirect** | Redirects both HTTP (port 80) and HTTPS (port 443) to a configured URL |
+| 🔑 | **Let's Encrypt** | Built-in cert setup script with auto-renewal, no downtime required |
+| 📡 | **PROXY Protocol v1** | Passes the real client IP to the backend BBS (requires compatible backend) |
+| 🌍 | **Country Blocking** | Block connections by country using a local GeoIP database |
+| ✅ | **IP Whitelist** | Trusted IPs that bypass all firewall rules |
+| 🚫 | **IP Blocklist** | Permanently block specific IPs or CIDR ranges |
+| ⚡ | **Rate Limiting** | Automatic flood protection with configurable temporary blocks |
+| 🔗 | **Per-IP Connection Limit** | Cap simultaneous connections from a single IP |
+| 🖥️ | **Encoding Detection** | Automatic UTF-8/CP437 detection with separate backend routing |
+| 🛑 | **Graceful Shutdown** | Clean shutdown on SIGTERM/SIGINT, active sessions drain properly |
+| ⚙️ | **PM2 Ready** | Includes `ecosystem.config.js` for process management |
+
+---
+
+## 🚀 Installation
 
 ### Requirements
 
@@ -72,11 +90,11 @@ pm2 list                        # status
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 All settings live in `.env`. Copy `.env.example` to get started — every option is documented there.
 
-### Network
+### 🌐 Network
 
 | Variable | Description | Default |
 |---|---|---|
@@ -87,7 +105,7 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 | `BACKEND_PORT_CP437` | Backend port for CP437 (DOS/ANSI) clients | `2323` |
 | `BACKEND_PORT_UTF8` | Backend port for UTF-8 (Unicode) clients | `2423` |
 
-### Connection Limits
+### 🔗 Connection Limits
 
 | Variable | Description | Default |
 |---|---|---|
@@ -95,21 +113,21 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 | `MAX_CONNECTIONS_PER_IP` | Max simultaneous connections from a single IP (`0` = unlimited) | `0` |
 | `CONNECTION_TIMEOUT` | Connection timeout in milliseconds (`0` to disable) | `300000` |
 
-### Country Blocking
+### 🌍 Country Blocking
 
 | Variable | Description | Default |
 |---|---|---|
 | `BLOCKED_COUNTRIES` | Comma-separated ISO country codes to block (e.g. `CN,RU,KP`) | _(empty)_ |
 | `BLOCK_UNKNOWN_COUNTRIES` | Block connections with undetermined country | `false` |
 
-### IP Lists
+### 🛡️ IP Lists
 
 | Variable | Description | Default |
 |---|---|---|
 | `WHITELIST_PATH` | Path to IP whitelist file (bypasses all firewall rules) | _(empty)_ |
 | `BLOCKLIST_PATH` | Path to IP blocklist file (permanent blocks) | _(empty)_ |
 
-### Rate Limiting
+### ⚡ Rate Limiting
 
 | Variable | Description | Default |
 |---|---|---|
@@ -118,20 +136,20 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 | `RATE_LIMIT_WINDOW_MS` | Time window in milliseconds | `60000` |
 | `RATE_LIMIT_BLOCK_DURATION_MS` | Temporary block duration in milliseconds | `300000` |
 
-### PROXY Protocol
+### 📡 PROXY Protocol
 
 | Variable | Description | Default |
 |---|---|---|
 | `PROXY_PROTOCOL_ENABLED` | Prepend real client IP to backend TCP stream | `false` |
 
-### Web Redirect
+### 🌐 Web Redirect
 
 | Variable | Description | Default |
 |---|---|---|
 | `WEB_REDIRECT_ENABLED` | Redirect HTTP traffic on port 80 | `false` |
 | `WEB_REDIRECT_URL` | Destination URL for redirects (used by both HTTP and HTTPS) | _(empty)_ |
 
-### HTTPS Redirect
+### 🔒 HTTPS Redirect
 
 | Variable | Description | Default |
 |---|---|---|
@@ -141,13 +159,13 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 | `HTTPS_KEY_PATH` | Path to TLS private key | `./certs/privkey.pem` |
 | `ACME_WEBROOT` | Directory for Let's Encrypt challenge files | `./certs/webroot` |
 
-### Logging
+### 📋 Logging
 
 | Variable | Description | Default |
 |---|---|---|
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 
-### SSH Server
+### 🔒 SSH Server
 
 | Variable | Description | Default |
 |---|---|---|
@@ -158,7 +176,7 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 
 ---
 
-## SSH Server
+## 🔒 SSH Server
 
 BBSFirewall includes an optional SSH server that accepts any username and password and proxies the session to the backend BBS via telnet. This lets users connect with a modern SSH client instead of a raw telnet client.
 
@@ -193,13 +211,11 @@ Includes both modern and legacy ciphers for old terminal clients:
 - `aes128-cbc`, `aes192-cbc`, `aes256-cbc`
 - `3des-cbc` (for very old clients)
 
-### Known Limitation
-
-Binary file transfers (Zmodem, Ymodem, etc.) do not work reliably over SSH due to PTY character processing. Use the telnet connection for file transfers and SSH for interactive browsing.
+> **Note:** Binary file transfers (Zmodem, Ymodem, etc.) do not work reliably over SSH due to PTY character processing. Use the telnet connection for file transfers and SSH for interactive browsing.
 
 ---
 
-## Web & HTTPS Redirect
+## 🌐 Web & HTTPS Redirect
 
 BBSFirewall can redirect web browsers that hit your firewall's IP address to your BBS website.
 
@@ -223,11 +239,11 @@ HTTPS_KEY_PATH=./certs/privkey.pem
 
 `WEB_REDIRECT_URL` is used as the destination for both HTTP and HTTPS redirects.
 
-**Note:** On Linux, binding ports 80 and 443 requires root or the `CAP_NET_BIND_SERVICE` capability.
+> **Note:** On Linux, binding ports 80 and 443 requires root or the `CAP_NET_BIND_SERVICE` capability.
 
 ---
 
-## Let's Encrypt Certificates
+## 🔑 Let's Encrypt Certificates
 
 BBSFirewall includes `setup-certs.sh` to get a free TLS certificate from Let's Encrypt using certbot's webroot method. The HTTP server stays running the whole time — no downtime.
 
@@ -262,7 +278,7 @@ Renewal is also automatic via certbot's built-in systemd timer — you don't hav
 
 ---
 
-## PROXY Protocol v1
+## 📡 PROXY Protocol v1
 
 BBSFirewall can prepend a PROXY Protocol v1 header to every backend connection so the destination BBS can see the real client IP instead of the firewall's IP.
 
@@ -280,9 +296,7 @@ Fields: `protocol`, `real client IP`, `proxy IP`, `client port`, `proxy port`.
 
 This works for both telnet and SSH connections.
 
-### Important
-
-The backend BBS software must support PROXY Protocol, or have a module/plugin that reads and strips the header before the BBS sees it. **Enabling this against an incompatible backend will break all connections** — the BBS will receive the header line as garbage data at the start of every session.
+> ⚠️ **Important:** The backend BBS software must support PROXY Protocol, or have a module/plugin that reads and strips the header before the BBS sees it. **Enabling this against an incompatible backend will break all connections** — the BBS will receive the header line as garbage data at the start of every session.
 
 Compatible backends include HAProxy, Nginx, Synchronet, WWIV, Mystic, and any software with a PROXY Protocol module. Standard MajorBBS/Worldgroup requires a companion MBBS module to handle the header.
 
@@ -290,7 +304,7 @@ Full spec: https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
 
 ---
 
-## Country Blocking
+## 🌍 Country Blocking
 
 Block connections from specific countries using a local MaxMind GeoLite2 database. No external API calls — the lookup happens entirely on your server.
 
@@ -313,7 +327,7 @@ Use [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) two-l
 
 ---
 
-## IP Filtering & Rate Limiting
+## 🛡️ IP Filtering & Rate Limiting
 
 ### Whitelist
 
@@ -356,16 +370,18 @@ RATE_LIMIT_BLOCK_DURATION_MS=300000
 
 Every incoming connection goes through these checks in order:
 
-1. **Whitelist** — matched IPs are allowed immediately, all other checks skipped
-2. **Blocklist** — permanent block
-3. **Rate limit** — temporary block if threshold exceeded
-4. **Per-IP connection limit** — reject if over `MAX_CONNECTIONS_PER_IP`
-5. **GeoIP country check** — block if country is in `BLOCKED_COUNTRIES`
-6. **Forward** — connect to backend BBS
+| Step | Check | Action |
+|:---:|---|---|
+| 1 | ✅ Whitelist | Matched IPs are allowed immediately — all other checks skipped |
+| 2 | 🚫 Blocklist | Permanent block |
+| 3 | ⚡ Rate limit | Temporary block if threshold exceeded |
+| 4 | 🔗 Per-IP connection limit | Reject if over `MAX_CONNECTIONS_PER_IP` |
+| 5 | 🌍 GeoIP country check | Block if country is in `BLOCKED_COUNTRIES` |
+| 6 | 🔀 Forward | Connect to backend BBS |
 
 ---
 
-## Encoding Detection
+## 🖥️ Encoding Detection
 
 BBSFirewall can detect whether a connecting SSH client prefers UTF-8 or CP437 and route them to separate backend ports. Useful if your BBS software runs separate instances for each encoding.
 
@@ -379,7 +395,7 @@ Detection for SSH clients is based on the client's `LANG`/`LC_ALL` environment v
 
 ---
 
-## Architecture
+## 📁 Architecture
 
 ```
 BBSFirewall/
@@ -405,7 +421,7 @@ BBSFirewall/
 
 ---
 
-## Credits
+## 🏆 Credits
 
 BBSFirewall is developed and maintained by [Sysop Network](https://github.com/SysopNetwork).
 
@@ -413,6 +429,6 @@ Built on the foundation of [bbsfw](https://github.com/ryanfantus/bbsfw) by [Ryan
 
 ---
 
-## License
+## 📄 License
 
 MIT — Copyright (c) 2026 Sysop Network
