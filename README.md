@@ -94,38 +94,135 @@ pm2 list                        # status
 
 All settings live in `.env`. Copy `.env.example` to get started — every option is documented there.
 
-| Category | Variable | Description | Default |
-|---|---|---|---|
-| **🌐 Network** | `LISTEN_PORT` | Port to listen on for incoming telnet connections | `23` |
-| | `BACKEND_HOST` | Backend BBS server hostname or IP | `127.0.0.1` |
-| | `BACKEND_PORT` | Backend BBS server port | `23` |
-| | `ENCODING_DETECTION` | Enable automatic UTF-8/CP437 encoding detection | `false` |
-| | `BACKEND_PORT_CP437` | Backend port for CP437 (DOS/ANSI) clients | `2323` |
-| | `BACKEND_PORT_UTF8` | Backend port for UTF-8 (Unicode) clients | `2423` |
-| **🔗 Connection Limits** | `MAX_CONNECTIONS` | Maximum total simultaneous connections | `100` |
-| | `MAX_CONNECTIONS_PER_IP` | Max simultaneous connections from a single IP (`0` = unlimited) | `0` |
-| | `CONNECTION_TIMEOUT` | Connection timeout in milliseconds (`0` to disable) | `300000` |
-| **🌍 Country Blocking** | `BLOCKED_COUNTRIES` | Comma-separated ISO country codes to block (e.g. `CN,RU,KP`) | _(empty)_ |
-| | `BLOCK_UNKNOWN_COUNTRIES` | Block connections with undetermined country | `false` |
-| **🛡️ IP Lists** | `WHITELIST_PATH` | Path to IP whitelist file (bypasses all firewall rules) | _(empty)_ |
-| | `BLOCKLIST_PATH` | Path to IP blocklist file (permanent blocks) | _(empty)_ |
-| **⚡ Rate Limiting** | `RATE_LIMIT_ENABLED` | Enable connection flood protection | `true` |
-| | `MAX_CONNECTIONS_PER_WINDOW` | Max connection attempts per IP per time window | `10` |
-| | `RATE_LIMIT_WINDOW_MS` | Time window in milliseconds | `60000` |
-| | `RATE_LIMIT_BLOCK_DURATION_MS` | Temporary block duration in milliseconds | `300000` |
-| **📡 PROXY Protocol** | `PROXY_PROTOCOL_ENABLED` | Prepend real client IP to backend TCP stream | `false` |
-| **🌐 Web Redirect** | `WEB_REDIRECT_ENABLED` | Redirect HTTP traffic on port 80 | `false` |
-| | `WEB_REDIRECT_URL` | Destination URL for redirects (used by both HTTP and HTTPS) | _(empty)_ |
-| **🔒 HTTPS Redirect** | `HTTPS_REDIRECT_ENABLED` | Redirect HTTPS traffic on port 443 | `false` |
-| | `HTTPS_REDIRECT_PORT` | Port to listen on for HTTPS | `443` |
-| | `HTTPS_CERT_PATH` | Path to TLS certificate (fullchain) | `./certs/fullchain.pem` |
-| | `HTTPS_KEY_PATH` | Path to TLS private key | `./certs/privkey.pem` |
-| | `ACME_WEBROOT` | Directory for Let's Encrypt challenge files | `./certs/webroot` |
-| **📋 Logging** | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
-| **🔒 SSH Server** | `SSH_ENABLED` | Enable the SSH server | `false` |
-| | `SSH_LISTEN_PORT` | Port to listen on for SSH connections | `2222` |
-| | `SSH_HOST_KEY` | Path to SSH host private key file | `./ssh_host_key` |
-| | `SSH_CIPHERS` | Comma-separated list of allowed SSH ciphers | _(see below)_ |
+### 🌐 Network
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>LISTEN_PORT</code></td><td>Port to listen on for incoming telnet connections</td><td><code>23</code></td></tr>
+<tr><td><code>BACKEND_HOST</code></td><td>Backend BBS server hostname or IP</td><td><code>127.0.0.1</code></td></tr>
+<tr><td><code>BACKEND_PORT</code></td><td>Backend BBS server port</td><td><code>23</code></td></tr>
+<tr><td><code>ENCODING_DETECTION</code></td><td>Enable automatic UTF-8/CP437 encoding detection</td><td><code>false</code></td></tr>
+<tr><td><code>BACKEND_PORT_CP437</code></td><td>Backend port for CP437 (DOS/ANSI) clients</td><td><code>2323</code></td></tr>
+<tr><td><code>BACKEND_PORT_UTF8</code></td><td>Backend port for UTF-8 (Unicode) clients</td><td><code>2423</code></td></tr>
+</table>
+
+### 🔗 Connection Limits
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>MAX_CONNECTIONS</code></td><td>Maximum total simultaneous connections</td><td><code>100</code></td></tr>
+<tr><td><code>MAX_CONNECTIONS_PER_IP</code></td><td>Max simultaneous connections from a single IP (<code>0</code> = unlimited)</td><td><code>0</code></td></tr>
+<tr><td><code>CONNECTION_TIMEOUT</code></td><td>Connection timeout in milliseconds (<code>0</code> to disable)</td><td><code>300000</code></td></tr>
+</table>
+
+### 🌍 Country Blocking
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>BLOCKED_COUNTRIES</code></td><td>Comma-separated ISO country codes to block (e.g. <code>CN,RU,KP</code>)</td><td><em>(empty)</em></td></tr>
+<tr><td><code>BLOCK_UNKNOWN_COUNTRIES</code></td><td>Block connections with undetermined country</td><td><code>false</code></td></tr>
+</table>
+
+### 🛡️ IP Lists
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>WHITELIST_PATH</code></td><td>Path to IP whitelist file (bypasses all firewall rules)</td><td><em>(empty)</em></td></tr>
+<tr><td><code>BLOCKLIST_PATH</code></td><td>Path to IP blocklist file (permanent blocks)</td><td><em>(empty)</em></td></tr>
+</table>
+
+### ⚡ Rate Limiting
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>RATE_LIMIT_ENABLED</code></td><td>Enable connection flood protection</td><td><code>true</code></td></tr>
+<tr><td><code>MAX_CONNECTIONS_PER_WINDOW</code></td><td>Max connection attempts per IP per time window</td><td><code>10</code></td></tr>
+<tr><td><code>RATE_LIMIT_WINDOW_MS</code></td><td>Time window in milliseconds</td><td><code>60000</code></td></tr>
+<tr><td><code>RATE_LIMIT_BLOCK_DURATION_MS</code></td><td>Temporary block duration in milliseconds</td><td><code>300000</code></td></tr>
+</table>
+
+### 📡 PROXY Protocol
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>PROXY_PROTOCOL_ENABLED</code></td><td>Prepend real client IP to backend TCP stream</td><td><code>false</code></td></tr>
+</table>
+
+### 🌐 Web Redirect
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>WEB_REDIRECT_ENABLED</code></td><td>Redirect HTTP traffic on port 80</td><td><code>false</code></td></tr>
+<tr><td><code>WEB_REDIRECT_URL</code></td><td>Destination URL for redirects (used by both HTTP and HTTPS)</td><td><em>(empty)</em></td></tr>
+</table>
+
+### 🔒 HTTPS Redirect
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>HTTPS_REDIRECT_ENABLED</code></td><td>Redirect HTTPS traffic on port 443</td><td><code>false</code></td></tr>
+<tr><td><code>HTTPS_REDIRECT_PORT</code></td><td>Port to listen on for HTTPS</td><td><code>443</code></td></tr>
+<tr><td><code>HTTPS_CERT_PATH</code></td><td>Path to TLS certificate (fullchain)</td><td><code>./certs/fullchain.pem</code></td></tr>
+<tr><td><code>HTTPS_KEY_PATH</code></td><td>Path to TLS private key</td><td><code>./certs/privkey.pem</code></td></tr>
+<tr><td><code>ACME_WEBROOT</code></td><td>Directory for Let's Encrypt challenge files</td><td><code>./certs/webroot</code></td></tr>
+</table>
+
+### 📋 Logging
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>LOG_LEVEL</code></td><td>Log level: <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code></td><td><code>info</code></td></tr>
+</table>
+
+### 🔒 SSH Server
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>SSH_ENABLED</code></td><td>Enable the SSH server</td><td><code>false</code></td></tr>
+<tr><td><code>SSH_LISTEN_PORT</code></td><td>Port to listen on for SSH connections</td><td><code>2222</code></td></tr>
+<tr><td><code>SSH_HOST_KEY</code></td><td>Path to SSH host private key file</td><td><code>./ssh_host_key</code></td></tr>
+<tr><td><code>SSH_CIPHERS</code></td><td>Comma-separated list of allowed SSH ciphers</td><td><em>(see below)</em></td></tr>
+</table>
 
 ---
 
@@ -376,7 +473,7 @@ BBSFirewall/
 
 ## 🏆 Credits
 
-BBSFirewall is developed and maintained by [Sysop Network](https://github.com/SysopNetwork).
+BBSFirewall is developed and maintained by [Mark Laudenbach](https://github.com/laudenbachm) at [Sysop Network](https://github.com/SysopNetwork).
 
 Built on the foundation of [bbsfw](https://github.com/ryanfantus/bbsfw) by [Ryan Fantus](https://github.com/ryanfantus). Solid starting point — thanks for putting that together.
 
@@ -384,4 +481,4 @@ Built on the foundation of [bbsfw](https://github.com/ryanfantus/bbsfw) by [Ryan
 
 ## 📄 License
 
-MIT — Copyright (c) 2026 Mark Laudenbach at Sysop Network
+MIT — Copyright (c) 2026 Sysop Network
