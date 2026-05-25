@@ -15,6 +15,9 @@ whitelist.txt
 ssh_host_key
 ssh_host_key.pub
 
+# TLS certificates and ACME webroot — private keys stay off GitHub
+certs/
+
 # Logs
 *.log
 logs/

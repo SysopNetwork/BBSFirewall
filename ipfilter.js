@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - IP filtering, rate limiting, and connection tracking
+ * BBSFirewall - IP filtering, rate limiting, and connection tracking
  * https://github.com/SysopNetwork/BBSFirewall
  */
 

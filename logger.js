@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - Logging utility
+ * BBSFirewall - Logging utility
  * https://github.com/SysopNetwork/BBSFirewall
  */
 

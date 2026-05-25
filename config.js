@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - Configuration
+ * BBSFirewall - Configuration
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
@@ -48,10 +48,27 @@ const config = {
   rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
   rateLimitBlockDurationMs: parseInt(process.env.RATE_LIMIT_BLOCK_DURATION_MS || '300000', 10),
 
+  // PROXY Protocol v1 — prepends the real client IP to the backend TCP stream.
+  // Only enable this if your backend BBS (or a companion module) supports PROXY Protocol.
+  // Without a compatible backend, enabling this will break all connections.
+  proxyProtocolEnabled: process.env.PROXY_PROTOCOL_ENABLED === 'true',
+
   // Web redirect server — redirects HTTP traffic on port 80 to a configured URL
   // Useful when clients browse to the firewall IP in a web browser
   webRedirectEnabled: process.env.WEB_REDIRECT_ENABLED === 'true',
   webRedirectUrl: process.env.WEB_REDIRECT_URL || '',
+
+  // HTTPS redirect server — same redirect but on port 443 with TLS
+  // Requires a certificate. Run setup-certs.sh to get one from Let's Encrypt.
+  httpsRedirectEnabled: process.env.HTTPS_REDIRECT_ENABLED === 'true',
+  httpsRedirectPort: parseInt(process.env.HTTPS_REDIRECT_PORT || '443', 10),
+  httpsCertPath: process.env.HTTPS_CERT_PATH || './certs/fullchain.pem',
+  httpsKeyPath: process.env.HTTPS_KEY_PATH || './certs/privkey.pem',
+
+  // Directory where certbot writes ACME challenge files during cert issuance/renewal.
+  // The HTTP redirect server serves files from this path so certbot can verify
+  // your domain without stopping BBSFirewall. setup-certs.sh handles this automatically.
+  acmeWebroot: process.env.ACME_WEBROOT || './certs/webroot',
 
   // Logging level: debug, info, warn, error
   logLevel: process.env.LOG_LEVEL || 'info',
@@ -106,6 +123,21 @@ function validateConfig() {
 
   if (config.webRedirectEnabled && !config.webRedirectUrl) {
     errors.push('WEB_REDIRECT_URL is required when WEB_REDIRECT_ENABLED is true');
+  }
+
+  if (config.httpsRedirectEnabled) {
+    if (!config.webRedirectUrl) {
+      errors.push('WEB_REDIRECT_URL is required when HTTPS_REDIRECT_ENABLED is true');
+    }
+    if (config.httpsRedirectPort < 1 || config.httpsRedirectPort > 65535) {
+      errors.push('HTTPS_REDIRECT_PORT must be between 1 and 65535');
+    }
+    if (!config.httpsCertPath) {
+      errors.push('HTTPS_CERT_PATH is required when HTTPS_REDIRECT_ENABLED is true');
+    }
+    if (!config.httpsKeyPath) {
+      errors.push('HTTPS_KEY_PATH is required when HTTPS_REDIRECT_ENABLED is true');
+    }
   }
 
   if (config.sshEnabled) {

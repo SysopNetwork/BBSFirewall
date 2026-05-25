@@ -1,0 +1,64 @@
+
+ ______  ______  ______  _______ _                     _ _
+|  ___ \|  ___ \/ _____)(_______)(_)                  | | |
+| |___) ) |___) ) /       _____   _  ____ _____ _ _ _ | | |
+|  ___ (|  ____/ |      |  ___) | |/ ___) ___ | | | || | |
+| |___) ) |    | \_____  | |     | | |   | ____| | | || | |
+|______/|_|     \______) |_|     |_|_|   |_____)\____|_|\_)
+
+
+                   [ by Sysop Network ]
+
+
+-------------------------------------------------------------------------------
+ [ about ]
+-------------------------------------------------------------------------------
+
+  BBSFirewall is a lightweight TCP proxy firewall for retro BBS systems.
+  Drop it in front of your BBS and it'll handle the riff-raff so you
+  don't have to babysit port 23 at 2am.
+
+  Written in Node.js. Runs anywhere Node runs. No drama.
+
+  https://github.com/SysopNetwork/BBSFirewall
+
+-------------------------------------------------------------------------------
+ [ features ]
+-------------------------------------------------------------------------------
+
+  * TCP proxy — forwards telnet connections to your backend BBS
+  * Per-IP connection limiting — because some people have no chill
+  * HTTP redirect — send web browsers somewhere useful instead of nowhere
+  * GeoIP country blocking — MaxMind GeoLite2, works offline
+  * IP whitelist — trusted IPs bypass everything, no questions asked
+  * IP blocklist — permanent bans with CIDR support
+  * Rate limiting — flood protection with auto-temporary blocks
+  * SSH server — accepts any credentials, proxies to telnet backend
+  * UTF-8 / CP437 detection — routes clients to the right backend port
+  * Graceful shutdown — cleans up nicely when you tell it to stop
+
+-------------------------------------------------------------------------------
+ [ setup ]
+-------------------------------------------------------------------------------
+
+  1. npm install
+  2. cp .env.example .env  (and edit it)
+  3. npm run setup-geoip   (optional, for country blocking)
+  4. npm start
+
+  Full docs in README.md
+
+-------------------------------------------------------------------------------
+ [ credits ]
+-------------------------------------------------------------------------------
+
+  BBSFirewall by Sysop Network
+  Based on bbsfw by Ryan Fantus — https://github.com/ryanfantus/bbsfw
+
+-------------------------------------------------------------------------------
+ [ license ]
+-------------------------------------------------------------------------------
+
+  MIT — Copyright (c) 2026 Sysop Network
+
+-------------------------------------------------------------------------------

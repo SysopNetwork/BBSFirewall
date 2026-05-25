@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - TCP proxy connection handler
+ * BBSFirewall - TCP proxy connection handler
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
@@ -9,6 +9,7 @@ const { config } = require('./config');
 const { getGeoIP } = require('./geoip');
 const { getIPFilter } = require('./ipfilter');
 const { detectFromTelnetNegotiation, getBackendPortForEncoding } = require('./encoding-detector');
+const { buildHeader: buildProxyHeader } = require('./proxy-protocol');
 
 class ProxyConnection {
   constructor(clientSocket, backendHost, backendPort) {
@@ -109,6 +110,19 @@ class ProxyConnection {
       logger.info(`[${this.connectionId}] Connected to backend ${backendAddr} (from ${localAddr})`);
       this.backendSocket.setNoDelay(true);
       this.backendSocket.setKeepAlive(true);
+
+      // Send PROXY Protocol v1 header before any BBS data flows.
+      // The backend must support it — see PROXY_PROTOCOL_ENABLED in .env.
+      if (config.proxyProtocolEnabled) {
+        const header = buildProxyHeader(
+          this.clientSocket.remoteAddress,
+          this.backendSocket.localAddress,
+          this.clientSocket.remotePort,
+          this.backendSocket.localPort
+        );
+        this.backendSocket.write(header);
+        logger.info(`[${this.connectionId}] PROXY Protocol header sent: ${header.trim()}`);
+      }
     });
 
     // Error handlers must be set before data pipes to catch early failures

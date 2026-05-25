@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * BBS Firewall - MaxMind GeoLite2 database setup helper
+ * BBSFirewall - MaxMind GeoLite2 database setup helper
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
@@ -13,7 +13,7 @@ const { execSync } = require('child_process');
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'GeoLite2-Country.mmdb');
 
-console.log('=== BBS Firewall - GeoIP Database Setup ===\n');
+console.log('=== BBSFirewall - GeoIP Database Setup ===\n');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });

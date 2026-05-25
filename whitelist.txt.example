@@ -1,4 +1,4 @@
-# BBS Firewall - IP Whitelist
+# BBSFirewall - IP Whitelist
 #
 # IPs listed here bypass ALL firewall rules including country blocking,
 # rate limiting, and the blocklist. Use this for trusted IPs only.

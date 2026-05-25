@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - GeoIP country lookup using MaxMind GeoLite2
+ * BBSFirewall - GeoIP country lookup using MaxMind GeoLite2
  * https://github.com/SysopNetwork/BBSFirewall
  */
 

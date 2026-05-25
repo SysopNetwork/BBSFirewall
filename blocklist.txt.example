@@ -1,4 +1,4 @@
-# BBS Firewall - IP Blocklist
+# BBSFirewall - IP Blocklist
 #
 # IPs listed here are permanently blocked from connecting.
 # This is separate from the temporary blocks applied by rate limiting.

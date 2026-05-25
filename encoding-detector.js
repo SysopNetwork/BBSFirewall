@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - Encoding detection (UTF-8 vs CP437)
+ * BBSFirewall - Encoding detection (UTF-8 vs CP437)
  * Routes clients to the appropriate backend port based on their terminal encoding.
  * https://github.com/SysopNetwork/BBSFirewall
  */

@@ -1,5 +1,5 @@
 /**
- * BBS Firewall - SSH server
+ * BBSFirewall - SSH server
  * Accepts any credentials and proxies the session to the backend telnet server.
  * Note: Binary file transfers (Zmodem, etc.) are unreliable over SSH due to PTY processing.
  * https://github.com/SysopNetwork/BBSFirewall
@@ -11,6 +11,7 @@ const fs = require('fs');
 const logger = require('./logger');
 const { getIPFilter } = require('./ipfilter');
 const { detectFromSSHEnvironment, detectFromTerminalType, getBackendPortForEncoding } = require('./encoding-detector');
+const { buildHeader: buildProxyHeader } = require('./proxy-protocol');
 
 function createSSHServer(config) {
   if (!config.sshEnabled) {
@@ -34,7 +35,8 @@ function createSSHServer(config) {
       },
     },
     (client) => {
-      const clientIP = client._sock?.remoteAddress;
+      const clientIP   = client._sock?.remoteAddress;
+      const clientPort = client._sock?.remotePort || 0;
 
       client.on('error', (err) => {
         logger.debug(`SSH client error: ${err.message}`);
@@ -167,6 +169,19 @@ function createSSHServer(config) {
             backendSocket.connect(actualBackendPort, config.backendHost, () => {
               logger.info(`SSH client ${clientIP} connected to backend ${config.backendHost}:${actualBackendPort}`);
               backendSocket.setNoDelay(true);
+
+              // Send PROXY Protocol v1 header before any BBS data flows.
+              // The backend must support it — see PROXY_PROTOCOL_ENABLED in .env.
+              if (config.proxyProtocolEnabled) {
+                const header = buildProxyHeader(
+                  clientIP,
+                  backendSocket.localAddress,
+                  clientPort,
+                  backendSocket.localPort
+                );
+                backendSocket.write(header);
+                logger.info(`SSH PROXY Protocol header sent for ${clientIP}: ${header.trim()}`);
+              }
             });
 
             let bytesFromClient = 0;

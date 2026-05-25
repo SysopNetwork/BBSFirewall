@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * BBS Firewall
- * TCP proxy firewall for BBS telnet connections
+ * BBSFirewall by Sysop Network
  * https://github.com/SysopNetwork/BBSFirewall
+ *
+ * Copyright (c) 2026 Sysop Network
+ * Based on bbsfw by Ryan Fantus — https://github.com/ryanfantus/bbsfw
+ * Licensed under MIT
  */
 
 const net = require('net');
@@ -31,8 +34,9 @@ class BBSFirewall {
     }
 
     logger.info('================================================');
-    logger.info('  BBS Firewall - by Sysop Network');
+    logger.info('  BBSFirewall by Sysop Network');
     logger.info('  https://github.com/SysopNetwork/BBSFirewall');
+    logger.info('  Based on bbsfw by Ryan Fantus');
     logger.info('================================================');
     logger.info('Starting...');
 
@@ -52,12 +56,18 @@ class BBSFirewall {
       maxConnectionsPerWindow: config.maxConnectionsPerWindow,
       rateLimitWindowMs: `${config.rateLimitWindowMs}ms`,
       blocklistPath: config.blocklistPath || 'none',
+      proxyProtocolEnabled: config.proxyProtocolEnabled,
       webRedirectEnabled: config.webRedirectEnabled,
       sshEnabled: config.sshEnabled,
     };
 
     if (config.webRedirectEnabled) {
       configLog.webRedirectUrl = config.webRedirectUrl;
+    }
+
+    if (config.httpsRedirectEnabled) {
+      configLog.httpsRedirectPort = config.httpsRedirectPort;
+      configLog.httpsCertPath = config.httpsCertPath;
     }
 
     if (config.sshEnabled) {
