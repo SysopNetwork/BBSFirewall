@@ -94,85 +94,38 @@ pm2 list                        # status
 
 All settings live in `.env`. Copy `.env.example` to get started — every option is documented there.
 
-### 🌐 Network
-
-| Variable | Description | Default |
-|---|---|---|
-| `LISTEN_PORT` | Port to listen on for incoming telnet connections | `23` |
-| `BACKEND_HOST` | Backend BBS server hostname or IP | `127.0.0.1` |
-| `BACKEND_PORT` | Backend BBS server port | `23` |
-| `ENCODING_DETECTION` | Enable automatic UTF-8/CP437 encoding detection | `false` |
-| `BACKEND_PORT_CP437` | Backend port for CP437 (DOS/ANSI) clients | `2323` |
-| `BACKEND_PORT_UTF8` | Backend port for UTF-8 (Unicode) clients | `2423` |
-
-### 🔗 Connection Limits
-
-| Variable | Description | Default |
-|---|---|---|
-| `MAX_CONNECTIONS` | Maximum total simultaneous connections | `100` |
-| `MAX_CONNECTIONS_PER_IP` | Max simultaneous connections from a single IP (`0` = unlimited) | `0` |
-| `CONNECTION_TIMEOUT` | Connection timeout in milliseconds (`0` to disable) | `300000` |
-
-### 🌍 Country Blocking
-
-| Variable | Description | Default |
-|---|---|---|
-| `BLOCKED_COUNTRIES` | Comma-separated ISO country codes to block (e.g. `CN,RU,KP`) | _(empty)_ |
-| `BLOCK_UNKNOWN_COUNTRIES` | Block connections with undetermined country | `false` |
-
-### 🛡️ IP Lists
-
-| Variable | Description | Default |
-|---|---|---|
-| `WHITELIST_PATH` | Path to IP whitelist file (bypasses all firewall rules) | _(empty)_ |
-| `BLOCKLIST_PATH` | Path to IP blocklist file (permanent blocks) | _(empty)_ |
-
-### ⚡ Rate Limiting
-
-| Variable | Description | Default |
-|---|---|---|
-| `RATE_LIMIT_ENABLED` | Enable connection flood protection | `true` |
-| `MAX_CONNECTIONS_PER_WINDOW` | Max connection attempts per IP per time window | `10` |
-| `RATE_LIMIT_WINDOW_MS` | Time window in milliseconds | `60000` |
-| `RATE_LIMIT_BLOCK_DURATION_MS` | Temporary block duration in milliseconds | `300000` |
-
-### 📡 PROXY Protocol
-
-| Variable | Description | Default |
-|---|---|---|
-| `PROXY_PROTOCOL_ENABLED` | Prepend real client IP to backend TCP stream | `false` |
-
-### 🌐 Web Redirect
-
-| Variable | Description | Default |
-|---|---|---|
-| `WEB_REDIRECT_ENABLED` | Redirect HTTP traffic on port 80 | `false` |
-| `WEB_REDIRECT_URL` | Destination URL for redirects (used by both HTTP and HTTPS) | _(empty)_ |
-
-### 🔒 HTTPS Redirect
-
-| Variable | Description | Default |
-|---|---|---|
-| `HTTPS_REDIRECT_ENABLED` | Redirect HTTPS traffic on port 443 | `false` |
-| `HTTPS_REDIRECT_PORT` | Port to listen on for HTTPS | `443` |
-| `HTTPS_CERT_PATH` | Path to TLS certificate (fullchain) | `./certs/fullchain.pem` |
-| `HTTPS_KEY_PATH` | Path to TLS private key | `./certs/privkey.pem` |
-| `ACME_WEBROOT` | Directory for Let's Encrypt challenge files | `./certs/webroot` |
-
-### 📋 Logging
-
-| Variable | Description | Default |
-|---|---|---|
-| `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
-
-### 🔒 SSH Server
-
-| Variable | Description | Default |
-|---|---|---|
-| `SSH_ENABLED` | Enable the SSH server | `false` |
-| `SSH_LISTEN_PORT` | Port to listen on for SSH connections | `2222` |
-| `SSH_HOST_KEY` | Path to SSH host private key file | `./ssh_host_key` |
-| `SSH_CIPHERS` | Comma-separated list of allowed SSH ciphers | _(see below)_ |
+| Category | Variable | Description | Default |
+|---|---|---|---|
+| **🌐 Network** | `LISTEN_PORT` | Port to listen on for incoming telnet connections | `23` |
+| | `BACKEND_HOST` | Backend BBS server hostname or IP | `127.0.0.1` |
+| | `BACKEND_PORT` | Backend BBS server port | `23` |
+| | `ENCODING_DETECTION` | Enable automatic UTF-8/CP437 encoding detection | `false` |
+| | `BACKEND_PORT_CP437` | Backend port for CP437 (DOS/ANSI) clients | `2323` |
+| | `BACKEND_PORT_UTF8` | Backend port for UTF-8 (Unicode) clients | `2423` |
+| **🔗 Connection Limits** | `MAX_CONNECTIONS` | Maximum total simultaneous connections | `100` |
+| | `MAX_CONNECTIONS_PER_IP` | Max simultaneous connections from a single IP (`0` = unlimited) | `0` |
+| | `CONNECTION_TIMEOUT` | Connection timeout in milliseconds (`0` to disable) | `300000` |
+| **🌍 Country Blocking** | `BLOCKED_COUNTRIES` | Comma-separated ISO country codes to block (e.g. `CN,RU,KP`) | _(empty)_ |
+| | `BLOCK_UNKNOWN_COUNTRIES` | Block connections with undetermined country | `false` |
+| **🛡️ IP Lists** | `WHITELIST_PATH` | Path to IP whitelist file (bypasses all firewall rules) | _(empty)_ |
+| | `BLOCKLIST_PATH` | Path to IP blocklist file (permanent blocks) | _(empty)_ |
+| **⚡ Rate Limiting** | `RATE_LIMIT_ENABLED` | Enable connection flood protection | `true` |
+| | `MAX_CONNECTIONS_PER_WINDOW` | Max connection attempts per IP per time window | `10` |
+| | `RATE_LIMIT_WINDOW_MS` | Time window in milliseconds | `60000` |
+| | `RATE_LIMIT_BLOCK_DURATION_MS` | Temporary block duration in milliseconds | `300000` |
+| **📡 PROXY Protocol** | `PROXY_PROTOCOL_ENABLED` | Prepend real client IP to backend TCP stream | `false` |
+| **🌐 Web Redirect** | `WEB_REDIRECT_ENABLED` | Redirect HTTP traffic on port 80 | `false` |
+| | `WEB_REDIRECT_URL` | Destination URL for redirects (used by both HTTP and HTTPS) | _(empty)_ |
+| **🔒 HTTPS Redirect** | `HTTPS_REDIRECT_ENABLED` | Redirect HTTPS traffic on port 443 | `false` |
+| | `HTTPS_REDIRECT_PORT` | Port to listen on for HTTPS | `443` |
+| | `HTTPS_CERT_PATH` | Path to TLS certificate (fullchain) | `./certs/fullchain.pem` |
+| | `HTTPS_KEY_PATH` | Path to TLS private key | `./certs/privkey.pem` |
+| | `ACME_WEBROOT` | Directory for Let's Encrypt challenge files | `./certs/webroot` |
+| **📋 Logging** | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
+| **🔒 SSH Server** | `SSH_ENABLED` | Enable the SSH server | `false` |
+| | `SSH_LISTEN_PORT` | Port to listen on for SSH connections | `2222` |
+| | `SSH_HOST_KEY` | Path to SSH host private key file | `./ssh_host_key` |
+| | `SSH_CIPHERS` | Comma-separated list of allowed SSH ciphers | _(see below)_ |
 
 ---
 
@@ -431,4 +384,4 @@ Built on the foundation of [bbsfw](https://github.com/ryanfantus/bbsfw) by [Ryan
 
 ## 📄 License
 
-MIT — Copyright (c) 2026 Sysop Network
+MIT — Copyright (c) 2026 Mark Laudenbach at Sysop Network

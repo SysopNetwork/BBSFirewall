@@ -4,7 +4,7 @@
  * BBSFirewall by Sysop Network
  * https://github.com/SysopNetwork/BBSFirewall
  *
- * Copyright (c) 2026 Sysop Network
+ * Copyright (c) 2026 Mark Laudenbach at Sysop Network
  * Based on bbsfw by Ryan Fantus — https://github.com/ryanfantus/bbsfw
  * Licensed under MIT
  */
