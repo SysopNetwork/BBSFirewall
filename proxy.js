@@ -93,6 +93,14 @@ class ProxyConnection {
     this.clientSocket.setNoDelay(true);
     this.clientSocket.setKeepAlive(true);
 
+    // Pause client data until the backend is connected and the PROXY header
+    // (if enabled) has been written.  Fast-connecting clients (fTelnet,
+    // MuffTerm, MegaMUD) send telnet negotiation bytes immediately on TCP
+    // connect.  Without this pause those bytes can reach the BBS before the
+    // PROXY header, causing PROXCLIP to miss the header and GALTNTD to echo
+    // it as raw text.
+    this.clientSocket.pause();
+
     const actualBackendPort = config.encodingDetection
       ? getBackendPortForEncoding(this.detectedEncoding, config)
       : this.backendPort;
@@ -123,6 +131,10 @@ class ProxyConnection {
         this.backendSocket.write(header);
         logger.info(`[${this.connectionId}] PROXY Protocol header sent: ${header.trim()}`);
       }
+
+      // PROXY header is now in the send buffer (or skipped); safe to let
+      // client data flow.
+      this.clientSocket.resume();
     });
 
     // Error handlers must be set before data pipes to catch early failures

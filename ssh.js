@@ -166,6 +166,11 @@ function createSSHServer(config) {
             backendSocket.setNoDelay(true);
             backendSocket.setKeepAlive(true, 30000);
 
+            // Pause the SSH stream until the backend is connected and the
+            // PROXY header has been written, so it is always first in the
+            // backend stream.
+            stream.pause();
+
             backendSocket.connect(actualBackendPort, config.backendHost, () => {
               logger.info(`SSH client ${clientIP} connected to backend ${config.backendHost}:${actualBackendPort}`);
               backendSocket.setNoDelay(true);
@@ -182,6 +187,8 @@ function createSSHServer(config) {
                 backendSocket.write(header);
                 logger.info(`SSH PROXY Protocol header sent for ${clientIP}: ${header.trim()}`);
               }
+
+              stream.resume();
             });
 
             let bytesFromClient = 0;
