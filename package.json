@@ -1,6 +1,6 @@
 {
   "name": "bbsfirewall",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "BBSFirewall - TCP proxy firewall for BBS telnet connections",
   "main": "server.js",
   "scripts": {
