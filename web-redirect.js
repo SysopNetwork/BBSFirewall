@@ -15,6 +15,8 @@ const path  = require('path');
 const logger = require('./logger');
 const { config } = require('./config');
 
+const log = logger.getLogger('web');
+
 let httpServer  = null;
 let httpsServer = null;
 
@@ -35,7 +37,7 @@ function serveAcmeChallenge(req, res) {
 
   try {
     const content = fs.readFileSync(challengeFile, 'utf8');
-    logger.info(`ACME challenge served: ${token}`);
+    log.info(`ACME challenge served: ${token}`);
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end(content);
     return true;
@@ -62,7 +64,7 @@ function makeRequestHandler(label) {
     }
 
     const host = req.headers.host || '';
-    logger.info(`${label} redirect: ${clientIp} [${host}${req.url}] -> ${config.webRedirectUrl}`);
+    log.connection(`${label} redirect: ${clientIp} [${host}${req.url}] -> ${config.webRedirectUrl}`);
     res.writeHead(301, { Location: config.webRedirectUrl });
     res.end();
   };
@@ -77,9 +79,9 @@ function ensureAcmeWebroot() {
   if (!fs.existsSync(dir)) {
     try {
       fs.mkdirSync(dir, { recursive: true });
-      logger.info(`Created ACME webroot: ${dir}`);
+      log.info(`Created ACME webroot: ${dir}`);
     } catch (err) {
-      logger.warn(`Could not create ACME webroot directory: ${err.message}`);
+      log.warn(`Could not create ACME webroot directory: ${err.message}`);
     }
   }
 }
@@ -89,7 +91,7 @@ function ensureAcmeWebroot() {
 // ---------------------------------------------------------------------------
 function startHttpServer() {
   if (!config.webRedirectEnabled) {
-    logger.info('HTTP redirect server is disabled');
+    log.info('HTTP redirect server is disabled');
     return;
   }
 
@@ -99,14 +101,14 @@ function startHttpServer() {
 
   httpServer.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      logger.error('Port 80 is already in use — HTTP redirect server failed to start');
+      log.error('Port 80 is already in use — HTTP redirect server failed to start');
     } else {
-      logger.error(`HTTP redirect server error: ${err.message}`);
+      log.error(`HTTP redirect server error: ${err.message}`);
     }
   });
 
   httpServer.listen(80, () => {
-    logger.info(`HTTP redirect server listening on port 80 -> ${config.webRedirectUrl}`);
+    log.info(`HTTP redirect server listening on port 80 -> ${config.webRedirectUrl}`);
   });
 }
 
@@ -118,7 +120,7 @@ function startHttpServer() {
 // ---------------------------------------------------------------------------
 function startHttpsServer() {
   if (!config.httpsRedirectEnabled) {
-    logger.info('HTTPS redirect server is disabled');
+    log.info('HTTPS redirect server is disabled');
     return;
   }
 
@@ -128,8 +130,8 @@ function startHttpsServer() {
     tlsKey  = fs.readFileSync(path.resolve(config.httpsKeyPath));
     tlsCert = fs.readFileSync(path.resolve(config.httpsCertPath));
   } catch (err) {
-    logger.error(`HTTPS redirect: failed to load TLS certificate — ${err.message}`);
-    logger.error('Run setup-certs.sh to generate a Let\'s Encrypt certificate, then restart.');
+    log.error(`HTTPS redirect: failed to load TLS certificate — ${err.message}`);
+    log.error('Run setup-certs.sh to generate a Let\'s Encrypt certificate, then restart.');
     return; // don't crash — everything else still works
   }
 
@@ -137,14 +139,14 @@ function startHttpsServer() {
 
   httpsServer.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      logger.error(`Port ${config.httpsRedirectPort} is already in use — HTTPS redirect server failed to start`);
+      log.error(`Port ${config.httpsRedirectPort} is already in use — HTTPS redirect server failed to start`);
     } else {
-      logger.error(`HTTPS redirect server error: ${err.message}`);
+      log.error(`HTTPS redirect server error: ${err.message}`);
     }
   });
 
   httpsServer.listen(config.httpsRedirectPort, () => {
-    logger.info(`HTTPS redirect server listening on port ${config.httpsRedirectPort} -> ${config.webRedirectUrl}`);
+    log.info(`HTTPS redirect server listening on port ${config.httpsRedirectPort} -> ${config.webRedirectUrl}`);
   });
 }
 
@@ -153,12 +155,12 @@ function startHttpsServer() {
 // ---------------------------------------------------------------------------
 function startWebRedirectServer() {
   if (!config.webRedirectEnabled && !config.httpsRedirectEnabled) {
-    logger.info('Web redirect is disabled');
+    log.info('Web redirect is disabled');
     return;
   }
 
   if (!config.webRedirectUrl) {
-    logger.warn('Web redirect is enabled but WEB_REDIRECT_URL is not set — skipping');
+    log.warn('Web redirect is enabled but WEB_REDIRECT_URL is not set — skipping');
     return;
   }
 
@@ -173,13 +175,13 @@ function stopWebRedirectServer() {
 
     if (httpServer) {
       pending++;
-      httpServer.close(() => { logger.info('HTTP redirect server closed'); done(); });
+      httpServer.close(() => { log.info('HTTP redirect server closed'); done(); });
       httpServer = null;
     }
 
     if (httpsServer) {
       pending++;
-      httpsServer.close(() => { logger.info('HTTPS redirect server closed'); done(); });
+      httpsServer.close(() => { log.info('HTTPS redirect server closed'); done(); });
       httpsServer = null;
     }
 

@@ -10,6 +10,13 @@ data/
 # IP lists (keep examples, ignore actual files)
 blocklist.txt
 whitelist.txt
+trustedhosts.txt
+triggers.txt
+
+# Config editor .env backups + carried-over session store
+.env.bak.*
+ENVBACKUPS/
+.config-editor-sessions.json
 
 # SSH host key
 ssh_host_key

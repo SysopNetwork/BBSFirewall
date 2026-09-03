@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "follow-redirects": "^1.16.0",
     "maxmind": "^4.3.0",
     "ssh2": "^1.17.0"
   },

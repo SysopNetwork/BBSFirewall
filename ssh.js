@@ -1,7 +1,9 @@
 /**
- * BBSFirewall - SSH server
+ * BBSFirewall - SSH server (terminate mode)
  * Accepts any credentials and proxies the session to the backend telnet server.
- * Note: Binary file transfers (Zmodem, etc.) are unreliable over SSH due to PTY processing.
+ * Note: Binary file transfers (Zmodem, etc.) are unreliable over SSH due to PTY
+ * processing — use SSH_MODE=passthrough with a backend that has its own SSH
+ * server if you need reliable transfers.
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
@@ -9,12 +11,15 @@ const ssh2 = require('ssh2');
 const net = require('net');
 const fs = require('fs');
 const logger = require('./logger');
+const metrics = require('./metrics');
 const { getIPFilter } = require('./ipfilter');
 const { detectFromSSHEnvironment, detectFromTerminalType, getBackendPortForEncoding } = require('./encoding-detector');
 const { buildHeader: buildProxyHeader } = require('./proxy-protocol');
 
+const log = logger.getLogger('ssh');
+
 function createSSHServer(config) {
-  if (!config.sshEnabled) {
+  if (config.sshMode !== 'terminate') {
     return null;
   }
 
@@ -22,8 +27,8 @@ function createSSHServer(config) {
   try {
     hostKey = fs.readFileSync(config.sshHostKey, 'utf8');
   } catch (err) {
-    logger.error(`Failed to read SSH host key from ${config.sshHostKey}: ${err.message}`);
-    logger.error('Generate a host key with: ssh-keygen -t rsa -b 4096 -f ssh_host_key -N "" -m PEM');
+    log.error(`Failed to read SSH host key from ${config.sshHostKey}: ${err.message}`);
+    log.error('Generate a host key with: ssh-keygen -t rsa -b 4096 -f ssh_host_key -N "" -m PEM');
     process.exit(1);
   }
 
@@ -39,31 +44,33 @@ function createSSHServer(config) {
       const clientPort = client._sock?.remotePort || 0;
 
       client.on('error', (err) => {
-        logger.debug(`SSH client error: ${err.message}`);
+        log.debug(`SSH client error: ${err.message}`);
       });
 
       if (!clientIP) {
-        logger.warn('SSH connection rejected: unable to determine client IP');
+        log.blocked('SSH connection rejected: unable to determine client IP');
         client.end();
         return;
       }
 
-      logger.info(`SSH client connected from ${clientIP}`);
+      log.connection(`SSH client connected from ${clientIP}`);
 
       const ipFilter = getIPFilter();
       let sshConnectionTracked = false;
+      let sshWhitelisted = false;
 
       if (ipFilter) {
         const accessCheck = ipFilter.shouldAllowConnection(clientIP);
         if (!accessCheck.allowed) {
-          logger.warn(`SSH connection blocked from ${clientIP}: ${accessCheck.reason}`);
+          log.blocked(`SSH connection blocked from ${clientIP}: ${accessCheck.reason}`);
           client.end();
           return;
         }
+        sshWhitelisted = accessCheck.whitelisted || false;
 
         // Check per-IP concurrent connection limit (whitelisted IPs are exempt)
         if (!accessCheck.whitelisted && ipFilter.isConnectionLimitExceeded(clientIP)) {
-          logger.warn(`SSH connection rejected: per-IP limit reached for ${clientIP}`);
+          log.blocked(`SSH connection rejected: per-IP limit reached for ${clientIP}`);
           client.end();
           return;
         }
@@ -74,7 +81,7 @@ function createSSHServer(config) {
       }
 
       client.on('authentication', (ctx) => {
-        logger.info(`SSH auth from ${clientIP} (user: ${ctx.username})`);
+        log.info(`SSH auth from ${clientIP} (user: ${ctx.username})`);
 
         if (ctx.method === 'password' || ctx.method === 'none') {
           ctx.accept();
@@ -84,13 +91,13 @@ function createSSHServer(config) {
       });
 
       client.on('ready', () => {
-        logger.info(`SSH client ${clientIP} authenticated`);
+        log.info(`SSH client ${clientIP} authenticated`);
 
         client.on('session', (accept, reject) => {
-          logger.debug(`Session requested for ${clientIP}`);
+          log.debug(`Session requested for ${clientIP}`);
 
           if (typeof accept !== 'function') {
-            logger.error(`Session accept is not a function for ${clientIP}`);
+            log.error(`Session accept is not a function for ${clientIP}`);
             return;
           }
 
@@ -101,14 +108,14 @@ function createSSHServer(config) {
           let termType = null;
 
           session.on('env', (accept, reject, info) => {
-            logger.debug(`SSH env from ${clientIP}: ${info.key}=${info.value}`);
+            log.debug(`SSH env from ${clientIP}: ${info.key}=${info.value}`);
             sshEnv[info.key] = info.value;
 
             if (config.encodingDetection) {
               const envDetected = detectFromSSHEnvironment(sshEnv);
               if (envDetected === 'utf8') {
                 detectedEncoding = 'utf8';
-                logger.info(`Detected UTF-8 encoding from SSH environment for ${clientIP}`);
+                log.info(`Detected UTF-8 encoding from SSH environment for ${clientIP}`);
               }
             }
 
@@ -116,7 +123,7 @@ function createSSHServer(config) {
           });
 
           session.on('pty', (accept, reject, info) => {
-            logger.debug(`PTY requested for ${clientIP}, term: ${info.term}`);
+            log.debug(`PTY requested for ${clientIP}, term: ${info.term}`);
 
             if (info && info.term) {
               termType = info.term;
@@ -125,7 +132,7 @@ function createSSHServer(config) {
                 const termDetected = detectFromTerminalType(termType);
                 if (termDetected === 'utf8') {
                   detectedEncoding = 'utf8';
-                  logger.info(`Detected UTF-8 from terminal type '${termType}' for ${clientIP}`);
+                  log.info(`Detected UTF-8 from terminal type '${termType}' for ${clientIP}`);
                 }
               }
             }
@@ -133,24 +140,24 @@ function createSSHServer(config) {
             if (typeof accept === 'function') {
               accept();
             } else {
-              logger.warn(`PTY accept is not a function for ${clientIP}`);
+              log.warn(`PTY accept is not a function for ${clientIP}`);
             }
           });
 
           session.on('window-change', (info) => {
-            logger.debug(`Window change for ${clientIP}: ${info.cols}x${info.rows}`);
+            log.debug(`Window change for ${clientIP}: ${info.cols}x${info.rows}`);
           });
 
           session.on('shell', (accept, reject) => {
-            logger.debug(`Shell requested for ${clientIP}`);
+            log.debug(`Shell requested for ${clientIP}`);
 
             if (typeof accept !== 'function') {
-              logger.error(`Shell accept is not a function for ${clientIP}`);
+              log.error(`Shell accept is not a function for ${clientIP}`);
               return;
             }
 
             const stream = accept();
-            logger.info(`SSH shell session started for ${clientIP}`);
+            log.connection(`SSH shell session started for ${clientIP}`);
 
             stream.allowHalfOpen = true;
 
@@ -159,7 +166,7 @@ function createSSHServer(config) {
               : config.backendPort;
 
             if (config.encodingDetection) {
-              logger.info(`SSH client ${clientIP} using backend port ${actualBackendPort} for encoding: ${detectedEncoding}`);
+              log.info(`SSH client ${clientIP} using backend port ${actualBackendPort} for encoding: ${detectedEncoding}`);
             }
 
             const backendSocket = new net.Socket();
@@ -172,7 +179,7 @@ function createSSHServer(config) {
             stream.pause();
 
             backendSocket.connect(actualBackendPort, config.backendHost, () => {
-              logger.info(`SSH client ${clientIP} connected to backend ${config.backendHost}:${actualBackendPort}`);
+              log.connection(`SSH client ${clientIP} connected to backend ${config.backendHost}:${actualBackendPort}`);
               backendSocket.setNoDelay(true);
 
               // Send PROXY Protocol v1 header before any BBS data flows.
@@ -185,7 +192,7 @@ function createSSHServer(config) {
                   backendSocket.localPort
                 );
                 backendSocket.write(header);
-                logger.info(`SSH PROXY Protocol header sent for ${clientIP}: ${header.trim()}`);
+                log.info(`SSH PROXY Protocol header sent for ${clientIP}: ${header.trim()}`);
               }
 
               stream.resume();
@@ -194,19 +201,40 @@ function createSSHServer(config) {
             let bytesFromClient = 0;
             let bytesFromBackend = 0;
 
+            let triggerScan = !!(config.triggerBlock && config.triggerBlock.enabled) && !sshWhitelisted;
+            let triggerBuf = null;
+
             stream.on('data', (data) => {
+              if (triggerScan) {
+                const cap = config.triggerBlock.scanBytes;
+                triggerBuf = triggerBuf ? Buffer.concat([triggerBuf, data]) : Buffer.from(data);
+                if (triggerBuf.length > cap) triggerBuf = triggerBuf.subarray(0, cap);
+
+                const ipf = getIPFilter();
+                const hit = ipf && ipf.matchTrigger(triggerBuf.toString('latin1'));
+                if (hit) {
+                  log.blocked(`Auto-block ${clientIP}: shell input matched trigger ${JSON.stringify(hit)}`);
+                  if (ipf) ipf.autoBlockIP(clientIP, hit);
+                  metrics.incTriggerBlock();
+                  stream.end();
+                  if (!backendSocket.destroyed) backendSocket.destroy();
+                  return;
+                }
+                if (triggerBuf.length >= cap) { triggerScan = false; triggerBuf = null; }
+              }
+
               bytesFromClient += data.length;
 
               if (!backendSocket.writable || backendSocket.destroyed) {
-                logger.debug(`Backend not writable, dropping ${data.length} bytes`);
+                log.debug(`Backend not writable, dropping ${data.length} bytes`);
                 return;
               }
 
               if (!backendSocket.write(data)) {
-                logger.debug('Backend buffer full, pausing SSH stream');
+                log.debug('Backend buffer full, pausing SSH stream');
                 stream.pause();
                 backendSocket.once('drain', () => {
-                  logger.debug('Backend drained, resuming SSH stream');
+                  log.debug('Backend drained, resuming SSH stream');
                   if (!stream.destroyed) stream.resume();
                 });
               }
@@ -216,50 +244,63 @@ function createSSHServer(config) {
               bytesFromBackend += data.length;
 
               if (!stream.writable || stream.destroyed) {
-                logger.debug(`SSH stream not writable, dropping ${data.length} bytes`);
+                log.debug(`SSH stream not writable, dropping ${data.length} bytes`);
                 return;
               }
 
               if (!stream.write(data)) {
-                logger.debug('SSH stream buffer full, pausing backend');
+                log.debug('SSH stream buffer full, pausing backend');
                 backendSocket.pause();
                 stream.once('drain', () => {
-                  logger.debug('SSH stream drained, resuming backend');
+                  log.debug('SSH stream drained, resuming backend');
                   if (!backendSocket.destroyed) backendSocket.resume();
                 });
               }
             });
 
             backendSocket.on('error', (err) => {
-              logger.error(`Backend error for SSH client ${clientIP}: ${err.message}`);
+              log.error(`Backend error for SSH client ${clientIP}: ${err.message}`);
               stream.end();
             });
 
             backendSocket.on('close', () => {
-              logger.info(`Backend connection closed for SSH client ${clientIP}`);
+              log.connection(`Backend connection closed for SSH client ${clientIP}`);
               stream.end();
             });
 
             stream.on('close', () => {
-              logger.info(`SSH stream closed for ${clientIP}. Bytes: client→backend=${bytesFromClient}, backend→client=${bytesFromBackend}`);
+              log.connection(`SSH stream closed for ${clientIP}. Bytes: client→backend=${bytesFromClient}, backend→client=${bytesFromBackend}`);
               if (!backendSocket.destroyed) backendSocket.destroy();
             });
 
             stream.on('error', (err) => {
-              logger.error(`SSH stream error for ${clientIP}: ${err.message}`);
+              log.error(`SSH stream error for ${clientIP}: ${err.message}`);
               if (!backendSocket.destroyed) backendSocket.destroy();
             });
           });
 
           session.on('exec', (accept, reject, info) => {
-            logger.debug(`Exec request from ${clientIP}: ${info.command}`);
+            log.debug(`Exec request from ${clientIP}: ${info.command}`);
+            // A remote command against a BBS gateway is always a bot. If it
+            // matches a trigger, blacklist the source.
+            if (config.triggerBlock && config.triggerBlock.enabled && !sshWhitelisted) {
+              const ipf = getIPFilter();
+              const hit = ipf && ipf.matchTrigger(String(info.command || ''));
+              if (hit) {
+                log.blocked(`Auto-block ${clientIP}: exec command matched trigger ${JSON.stringify(hit)}`);
+                if (ipf) ipf.autoBlockIP(clientIP, hit);
+                metrics.incTriggerBlock();
+                client.end();
+                return;
+              }
+            }
             reject();
           });
         });
       });
 
       client.on('close', () => {
-        logger.info(`SSH client ${clientIP} disconnected`);
+        log.connection(`SSH client ${clientIP} disconnected`);
         if (sshConnectionTracked) {
           const ipFilter = getIPFilter();
           if (ipFilter) ipFilter.trackConnectionClose(clientIP);
@@ -275,21 +316,20 @@ function startSSHServer(config, activeConnectionsTracker) {
   const server = createSSHServer(config);
 
   if (!server) {
-    logger.info('SSH server is disabled');
     return null;
   }
 
   server.on('error', (err) => {
-    logger.error(`SSH server error: ${err.message}`);
+    log.error(`SSH server error: ${err.message}`);
     if (err.code === 'EADDRINUSE') {
-      logger.error(`SSH port ${config.sshListenPort} is already in use`);
+      log.error(`SSH port ${config.sshListenPort} is already in use`);
       process.exit(1);
     }
   });
 
   server.listen(config.sshListenPort, () => {
-    logger.info(`SSH server listening on port ${config.sshListenPort}`);
-    logger.info(`SSH connections forwarded to ${config.backendHost}:${config.backendPort}`);
+    log.info(`SSH server (terminate) listening on port ${config.sshListenPort}`);
+    log.info(`SSH connections forwarded to ${config.backendHost}:${config.backendPort}`);
   });
 
   return server;

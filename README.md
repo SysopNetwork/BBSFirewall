@@ -1,10 +1,10 @@
 <div align="center">
 
 ```
-  ██████╗ ██████╗ ███████╗    ███████╗██╗██████╗ ███████╗██╗    ██╗ █████╗ ██╗     ██╗
-  ██╔══██╗██╔══██╗██╔════╝    ██╔════╝██║██╔══██╗██╔════╝██║    ██║██╔══██╗██║     ██║
-  ██████╔╝██████╔╝███████╗    █████╗  ██║██████╔╝█████╗  ██║ █╗ ██║███████║██║     ██║
-  ██╔══██╗██╔══██╗╚════██║    ██╔══╝  ██║██╔══██╗██╔══╝  ██║███╗██║██╔══██║██║     ██║
+       ██████╗ ██████╗ ███████╗    ███████╗██╗██████╗ ███████╗██╗    ██╗ █████╗ ██╗     ██╗
+       ██╔══██╗██╔══██╗██╔════╝    ██╔════╝██║██╔══██╗██╔════╝██║    ██║██╔══██╗██║     ██║
+       ██████╔╝██████╔╝███████╗    █████╗  ██║██████╔╝█████╗  ██║ █╗ ██║███████║██║     ██║
+       ██╔══██╗██╔══██╗╚════██║    ██╔══╝  ██║██╔══██╗██╔══╝  ██║███╗██║██╔══██║██║     ██║
        ██████╔╝██████╔╝███████║    ██║     ██║██║  ██║███████╗╚███╔███╔╝██║  ██║███████╗███████╗
        ╚═════╝ ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝
 ```
@@ -30,11 +30,13 @@ By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/S
 | 🔒 | **SSH Server** | Encrypted SSH access on any port, proxied to the telnet backend |
 | 🌐 | **HTTPS Redirect** | Redirects both HTTP (port 80) and HTTPS (port 443) to a configured URL |
 | 🔑 | **Let's Encrypt** | Built-in cert setup script with auto-renewal, no downtime required |
+| 🛠️ | **Web Config Editor** | HTTPS admin UI (port 8443) to edit `.env` and IP lists; trusted-host + login gated |
 | 📡 | **PROXY Protocol v1** | Passes the real client IP to the backend BBS (requires compatible backend) |
 | 🌍 | **Country Blocking** | Block connections by country using a local GeoIP database |
 | ✅ | **IP Whitelist** | Trusted IPs that bypass all firewall rules |
 | 🚫 | **IP Blocklist** | Permanently block specific IPs or CIDR ranges |
 | ⚡ | **Rate Limiting** | Automatic flood protection with configurable temporary blocks |
+| 🎯 | **Auto-Block Triggers** | Blacklist an IP that sends a known bot/scanner/exploit string in its first bytes |
 | 🔗 | **Per-IP Connection Limit** | Cap simultaneous connections from a single IP |
 | 🖥️ | **Encoding Detection** | Automatic UTF-8/CP437 detection with separate backend routing |
 | 🛑 | **Graceful Shutdown** | Clean shutdown on SIGTERM/SIGINT, active sessions drain properly |
@@ -161,6 +163,23 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 <tr><td><code>RATE_LIMIT_BLOCK_DURATION_MS</code></td><td>Temporary block duration in milliseconds</td><td><code>300000</code></td></tr>
 </table>
 
+### 🎯 Auto-Block Triggers
+
+Scan the first bytes a telnet/SSH caller sends for known bot / scanner / exploit strings and blacklist the source IP on a match. Patterns are read from a list file — plain text is a case-insensitive substring, `/regex/flags` is a JS regex, and `\xNN \r \n \t \0` escapes work in plain patterns (for TLS/binary probes). Also applies to SSH shell input and remote commands in terminate mode. Whitelisted IPs are exempt. Copy `triggers.txt.example` to `triggers.txt` to start.
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>TRIGGER_BLOCK_ENABLED</code></td><td>Enable auto-block on a trigger match</td><td><code>false</code></td></tr>
+<tr><td><code>TRIGGER_LIST_PATH</code></td><td>Path to the trigger pattern file</td><td><code>./triggers.txt</code></td></tr>
+<tr><td><code>TRIGGER_SCAN_BYTES</code></td><td>Bytes of the caller's first data to scan (16–65536)</td><td><code>1024</code></td></tr>
+<tr><td><code>TRIGGER_BLOCK_MODE</code></td><td><code>blocklist</code> = append to <code>blocklist.txt</code> (permanent); <code>temp</code> = in-memory block</td><td><code>blocklist</code></td></tr>
+<tr><td><code>TRIGGER_BLOCK_DURATION_MS</code></td><td>Block length for <code>temp</code> mode</td><td><code>86400000</code></td></tr>
+</table>
+
 ### 📡 PROXY Protocol
 
 <table>
@@ -197,6 +216,26 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 <tr><td><code>HTTPS_CERT_PATH</code></td><td>Path to TLS certificate (fullchain)</td><td><code>./certs/fullchain.pem</code></td></tr>
 <tr><td><code>HTTPS_KEY_PATH</code></td><td>Path to TLS private key</td><td><code>./certs/privkey.pem</code></td></tr>
 <tr><td><code>ACME_WEBROOT</code></td><td>Directory for Let's Encrypt challenge files</td><td><code>./certs/webroot</code></td></tr>
+</table>
+
+### 🛠️ Web Config Editor
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>CONFIG_EDITOR_ENABLED</code></td><td>Enable the HTTPS web config editor</td><td><code>false</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_PORT</code></td><td>Port the editor listens on (must differ from LISTEN_PORT / SSH port)</td><td><code>8443</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_BIND</code></td><td>Address to bind the editor listener to</td><td><code>0.0.0.0</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_USERNAME</code></td><td>Login username</td><td><em>(required)</em></td></tr>
+<tr><td><code>CONFIG_EDITOR_PASSWORD</code></td><td>Login password (minimum 8 characters)</td><td><em>(required)</em></td></tr>
+<tr><td><code>CONFIG_EDITOR_CERT_PATH</code></td><td>Path to the editor's TLS certificate (fullchain)</td><td><code>./certs/config-editor/fullchain.pem</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_KEY_PATH</code></td><td>Path to the editor's TLS private key</td><td><code>./certs/config-editor/privkey.pem</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_TRUSTEDHOSTS_PATH</code></td><td>IPv4/IPv6 CIDR allowlist file — empty/missing denies all</td><td><code>./trustedhosts.txt</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_SESSION_TIMEOUT_MS</code></td><td>Idle session timeout (min 60000)</td><td><code>1800000</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_PM2_APP</code></td><td>pm2 process name the Restart button acts on</td><td><code>bbsfirewall</code></td></tr>
 </table>
 
 ### 📋 Logging
@@ -328,6 +367,68 @@ Renewal is also automatic via certbot's built-in systemd timer — you don't hav
 
 ---
 
+## 🛠️ Web Config Editor
+
+An HTTPS admin UI (default port **8443**) for editing `.env` and the whitelist / blocklist / trustedhosts files from a browser instead of SSH. It runs in-process with the firewall on its own port and its own TLS certificate.
+
+### Two gates
+
+1. **Trusted-host allowlist** — `trustedhosts.txt`, one IPv4/IPv6 address or CIDR per line. Any address **not** matched is refused before the login page is even shown. An empty or missing file locks everyone out (fail-closed).
+2. **Login** — `CONFIG_EDITOR_USERNAME` / `CONFIG_EDITOR_PASSWORD` from `.env`, checked with a constant-time compare and exchanged for a short-lived, IP-bound session cookie (`HttpOnly`, `Secure`, `SameSite=Strict`). Failed logins lock the source IP for 15 minutes after 5 tries. Mutating requests also require a per-session CSRF token.
+
+### Setup
+
+```bash
+# 1. Certificate — Let's Encrypt for a public hostname...
+bash setup-config-cert.sh admin.example.com --email you@example.com
+
+# ...or self-signed for a bare IP / internal hostname
+bash setup-config-cert.sh 95.182.86.146 --self-signed
+
+# 2. Allowlist the IP(s) you will administer from
+cp trustedhosts.txt.example trustedhosts.txt
+$EDITOR trustedhosts.txt
+
+# 3. Enable it in .env
+CONFIG_EDITOR_ENABLED=true
+CONFIG_EDITOR_PORT=8443
+CONFIG_EDITOR_USERNAME=admin
+CONFIG_EDITOR_PASSWORD=a-long-passphrase
+CONFIG_EDITOR_CERT_PATH=./certs/config-editor/fullchain.pem
+CONFIG_EDITOR_KEY_PATH=./certs/config-editor/privkey.pem
+CONFIG_EDITOR_TRUSTEDHOSTS_PATH=./trustedhosts.txt
+
+# 4. Restart
+pm2 restart bbsfirewall
+```
+
+Then browse to `https://your-host:8443/`.
+
+> **Expose the editor port directly.** The trusted-host gate matches the real TCP peer address — it deliberately ignores `X-Forwarded-For`. Behind a reverse proxy every request would appear to come from the proxy, breaking the gate; the editor logs a warning if it sees a forwarding header. For defence in depth, also restrict the port at the host firewall (`ufw allow from <admin-ip> to any port 8443`) or bind it to a private interface / `127.0.0.1` (SSH tunnel) with `CONFIG_EDITOR_BIND`.
+
+### Tabs
+
+- **Settings** — the whole `.env`, grouped, with per-field help and a *more* toggle for longer explanations (e.g. SSH terminate vs passthrough).
+- **Tools** — one-click **download / update** of the MaxMind GeoIP database (needs `MAXMIND_LICENSE_KEY` saved), **generate an SSH host key** for terminate mode, and **issue a Let's Encrypt certificate** for the editor or the port-443 redirect (installs certbot if missing; console output shown on success or failure).
+- **Performance** — live CPU %, load average, memory, process RSS, disk, per-interface network throughput, and firewall counters (active connections, accepted/rejected, blocklist size, temp-blocked IPs). Auto-refreshes every 4s.
+- **whitelist.txt / blocklist.txt / trustedhosts.txt** — plain text editors for the list files.
+
+### Behavior
+
+- **Save** writes `.env` after a timestamped backup into an `ENVBACKUPS/` folder next to `.env` (`.env.bak.<ISO>`, newest 15 kept), then validates the result in a fresh process. If validation fails the previous `.env` is restored and the errors are returned — the running config is never left broken.
+- `.env` comments and layout are preserved; disabling an optional field comments its line out; new keys are appended under a marked block.
+- Editing `trustedhosts.txt` in the UI takes effect immediately (no restart). `.env` changes need a restart — the **Restart firewall** button runs `pm2 restart`, with a **Stay signed in after restart** checkbox: leave it checked and the page carries your session over and reconnects on its own; uncheck it to be logged out on restart.
+- Downloading/updating the GeoIP database and issuing the editor's own certificate both take effect live (no restart). Issuing the port-443 redirect certificate needs a restart.
+- The `setup-config-cert.sh` Let's Encrypt mode installs its own renewal hook; renew manually with `bash setup-config-cert.sh --renew`.
+
+### Certificate renewal
+
+```bash
+bash setup-config-cert.sh --renew
+```
+
+---
+
 ## 📡 PROXY Protocol v1
 
 BBSFirewall can prepend a PROXY Protocol v1 header to every backend connection so the destination BBS can see the real client IP instead of the firewall's IP.
@@ -428,6 +529,7 @@ Every incoming connection goes through these checks in order:
 | 4 | 🔗 Per-IP connection limit | Reject if over `MAX_CONNECTIONS_PER_IP` |
 | 5 | 🌍 GeoIP country check | Block if country is in `BLOCKED_COUNTRIES` |
 | 6 | 🔀 Forward | Connect to backend BBS |
+| 7 | 🎯 Trigger scan | While forwarding, scan the caller's first `TRIGGER_SCAN_BYTES`; blacklist + drop on a match |
 
 ---
 
@@ -453,6 +555,10 @@ BBSFirewall/
 ├── proxy.js               # Bidirectional TCP proxy handler
 ├── ssh.js                 # SSH server — accepts any credentials, proxies to telnet
 ├── web-redirect.js        # HTTP + HTTPS redirect server with ACME challenge support
+├── config-editor.js       # HTTPS web config editor (server, sessions, .env writer, tools, stats)
+├── config-editor-ui.js    # Config editor HTML views (login + app shell)
+├── trustedhosts.js        # IPv4/IPv6 CIDR allowlist matching for the config editor
+├── metrics.js             # Shared live counters read by the config editor's Performance tab
 ├── proxy-protocol.js      # PROXY Protocol v1 header builder
 ├── config.js              # Configuration loading and validation
 ├── logger.js              # Log level filtering
@@ -460,12 +566,15 @@ BBSFirewall/
 ├── ipfilter.js            # IP lists, rate limiting, per-IP connection tracking
 ├── encoding-detector.js   # UTF-8/CP437 detection logic
 ├── download-geoip.js      # GeoIP database setup helper
-├── setup-certs.sh         # Let's Encrypt certificate setup script
+├── setup-certs.sh         # Let's Encrypt certificate setup script (web redirect)
+├── setup-config-cert.sh   # TLS cert setup for the config editor (LE or self-signed)
 ├── ecosystem.config.js    # PM2 process config
 ├── package.json
 ├── .env.example           # Documented example configuration
 ├── whitelist.txt.example
 ├── blocklist.txt.example
+├── trustedhosts.txt.example
+├── triggers.txt.example
 └── data/                  # GeoIP database (not included, run setup-geoip)
 ```
 

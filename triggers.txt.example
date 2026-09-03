@@ -1,0 +1,59 @@
+# BBSFirewall - Auto-block trigger patterns
+#
+# If a caller sends one of these strings within the first TRIGGER_SCAN_BYTES
+# bytes, its IP is blacklisted (see TRIGGER_BLOCK_MODE: append to blocklist.txt,
+# or a timed in-memory block). Applies to the telnet proxy and, in SSH terminate
+# mode, to shell input and remote commands. Whitelisted IPs are never blocked.
+#
+# Pattern syntax, one per line:
+#   plain text       case-insensitive substring match
+#   /regex/flags     JavaScript regular expression (e.g. /^GET \/ HTTP/i)
+#   escapes in plain patterns:  \r  \n  \t  \0  \xNN   (for binary probes)
+# Lines starting with # are comments.
+#
+# WARNING: a real caller who types/sends one of these early would also be
+# blocked. Keep the list to things a BBS client would never send. The protocol-
+# mismatch entries below are safe; the shell/RCE ones are near-safe; review the
+# "aggressive" block before enabling it.
+#
+# To use: copy to triggers.txt, set TRIGGER_LIST_PATH=./triggers.txt and
+# TRIGGER_BLOCK_ENABLED=true in .env (or via the web config editor).
+
+# --- wrong protocol on the telnet port (HTTP scanners, TLS probes, SSH probes) ---
+GET /
+POST /
+HEAD /
+PUT /
+OPTIONS /
+CONNECT
+HTTP/1.
+Host:
+User-Agent:
+\x16\x03\x01
+\x16\x03\x03
+SSH-2.0-
+SSH-1.
+
+# --- shell / RCE / injection probes ---
+${jndi:
+/bin/sh
+/bin/bash
+;chmod +x
+| sh -c
+$(id)
+`id`
+<?php
+/etc/passwd
+../../../
+union select
+' or '1'='1
+
+# --- noisy binary padding some scanners lead with ---
+\x00\x00\x00\x00\x00\x00\x00\x00
+
+# --- aggressive: also catch download-and-run tooling. Uncomment if you never
+#     expect these words in the first bytes of a connection. ---
+# wget http
+# curl -O
+# tftp -
+# busybox

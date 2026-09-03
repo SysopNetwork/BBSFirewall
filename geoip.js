@@ -92,4 +92,16 @@ function getGeoIP() {
   return geoipInstance;
 }
 
-module.exports = { initializeGeoIP, getGeoIP };
+// Re-open the database from disk — used after the config editor downloads or
+// updates it, so country blocking picks up the new file without a restart.
+async function reloadGeoIP() {
+  if (!geoipInstance) {
+    return initializeGeoIP();
+  }
+  geoipInstance.reader = null;
+  geoipInstance.isEnabled = false;
+  await geoipInstance.initialize();
+  return geoipInstance;
+}
+
+module.exports = { initializeGeoIP, getGeoIP, reloadGeoIP };

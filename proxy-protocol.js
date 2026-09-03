@@ -39,10 +39,29 @@ function cleanIP(ip) {
  */
 function buildHeader(clientIp, proxyIp, clientPort, proxyPort) {
   const src = cleanIP(clientIp);
-  const dst = cleanIP(proxyIp);
+  let dst = cleanIP(proxyIp);
 
-  // Detect address family — if either address still contains a colon it's IPv6
-  const proto = src.includes(':') ? 'TCP6' : 'TCP4';
+  // The address family is set by the CLIENT address; the header's proto tag
+  // must match it.
+  const srcV6 = src.includes(':');
+  const dstV6 = dst.includes(':');
+
+  // PROXY Protocol v1 requires src and dst to be the same family. The client
+  // and the destination address are captured from different sockets, so an
+  // IPv6 client reaching an IPv4 backend would otherwise emit a malformed
+  // "TCP6 <v6> <v4>" line — which PROXCLIP (and the MBBS SSH module) reject,
+  // falling back to the proxy's own IP. Coerce the destination to agree.
+  if (srcV6 && !dstV6) {
+    // IPv4 destination expressed as an IPv4-mapped IPv6 literal.
+    dst = `::ffff:${dst}`;
+  } else if (!srcV6 && dstV6) {
+    // IPv4 client but IPv6 destination — collapse a mapped form; otherwise
+    // use a same-family placeholder (the dst is informational to the backend).
+    const collapsed = dst.replace(/^::ffff:/i, '');
+    dst = collapsed.includes(':') ? '0.0.0.0' : collapsed;
+  }
+
+  const proto = srcV6 ? 'TCP6' : 'TCP4';
 
   return `PROXY ${proto} ${src} ${dst} ${clientPort || 0} ${proxyPort || 0}\r\n`;
 }

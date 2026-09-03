@@ -31,11 +31,74 @@ function ipMatchesCIDR(ip, cidr) {
   return (ipInt & mask) === (rangeInt & mask);
 }
 
+// Expand \xNN, \r, \n, \t, \0, \\ escapes so plain trigger patterns can match
+// binary probes (TLS ClientHello, null padding, ...).
+function unescapePattern(s) {
+  return s
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\r/g, '\r')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\0/g, '\0')
+    .replace(/\\\\/g, '\\');
+}
+
+// Compile one trigger line. "/pat/flags" -> regex; anything else -> a
+// case-insensitive substring (after unescaping). Returns null if unusable.
+function compileTrigger(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return null;
+
+  // Treat as /regex/flags only when the trailing part is a valid JS flag set —
+  // otherwise "/bin/sh" or "/etc/passwd" would be misread as a regex and lost.
+  const m = t.match(/^\/(.+)\/([a-z]*)$/i);
+  if (m && m[1].length <= 400 && /^[dgimsuy]*$/.test(m[2])) {
+    try {
+      return { raw: t, kind: 'regex', re: new RegExp(m[1], m[2]) };
+    } catch (_) {
+      /* not a valid regex body — fall through and treat it as a literal */
+    }
+  }
+
+  const lit = unescapePattern(t);
+  if (!lit) return null;
+  return { raw: t, kind: 'substr', lit: lit.toLowerCase() };
+}
+
+// The classic exponential-backtracking shape: an unbounded quantifier applied
+// to a group or character class that ITSELF contains an unbounded quantifier —
+// (a+)+  (a*)*  (.+)+  ([a-z]+)*  (\w*){2,} ... We check this STATICALLY; never
+// run an untrusted regex against a probe string (doing so IS the ReDoS).
+const NESTED_QUANT_RE =
+  /(\([^()]*[*+][^()]*\)|\[[^\]]*[*+][^\]]*\]|\([^()]*\)[*+])[*+{]/;
+
+// Compile-check trigger text and flag patterns that will not parse or that
+// look like a ReDoS. Used by the config editor before it writes triggers.txt.
+function validateTriggerText(text) {
+  const invalid = [];
+  const slow = [];
+  let count = 0;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const c = compileTrigger(t);
+    if (!c) { invalid.push(t); continue; }
+    count++;
+    if (c.kind === 'regex') {
+      const body = c.re.source;
+      if (body.length > 400 || NESTED_QUANT_RE.test(body)) slow.push(t);
+    }
+  }
+  return { count, invalid, slow };
+}
+
 class IPFilter {
   constructor(config) {
     this.config = config;
     this.blocklist = new Set();
     this.whitelist = new Set();
+    this.triggers = [];                    // compiled auto-block trigger patterns
+    this.autoBlockCount = 0;               // IPs auto-blocked by a trigger this run
     this.connectionAttempts = new Map();   // IP -> [timestamps] — rate limit tracking
     this.blockedIPs = new Map();           // IP -> {blockedUntil, reason} — temporary blocks
     this.activeConnectionsByIP = new Map(); // IP -> active connection count
@@ -49,6 +112,11 @@ class IPFilter {
 
     if (this.config.blocklistPath) {
       this.loadBlocklist(this.config.blocklistPath);
+    }
+
+    const tb = this.config.triggerBlock;
+    if (tb && tb.enabled && tb.listPath) {
+      this.loadTriggers(tb.listPath);
     }
 
     this.cleanupInterval = setInterval(() => {
@@ -127,6 +195,95 @@ class IPFilter {
     if (!this.config.blocklistPath) return;
     this.blocklist.clear();
     this.loadBlocklist(this.config.blocklistPath);
+  }
+
+  loadTriggers(triggerPath) {
+    try {
+      const fullPath = path.resolve(triggerPath);
+
+      if (!fs.existsSync(fullPath)) {
+        logger.warn(`Trigger list file not found: ${fullPath}`);
+        return;
+      }
+
+      const content = fs.readFileSync(fullPath, 'utf-8');
+      let count = 0;
+      let bad = 0;
+
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const compiled = compileTrigger(trimmed);
+        if (compiled) { this.triggers.push(compiled); count++; }
+        else bad++;
+      }
+
+      logger.info(`Loaded ${count} auto-block trigger(s) from: ${fullPath}` +
+        (bad ? ` (${bad} unparseable line(s) skipped)` : ''));
+    } catch (err) {
+      logger.error(`Failed to load trigger list: ${err.message}`);
+    }
+  }
+
+  reloadTriggers() {
+    this.triggers = [];
+    const tb = this.config.triggerBlock;
+    if (tb && tb.enabled && tb.listPath) {
+      this.loadTriggers(tb.listPath);
+    }
+  }
+
+  // Return the raw text of the first trigger `text` matches, or null.
+  matchTrigger(text) {
+    if (!this.triggers.length || !text) return null;
+    const lower = text.toLowerCase();
+    for (const t of this.triggers) {
+      if (t.kind === 'substr') {
+        if (lower.includes(t.lit)) return t.raw;
+      } else {
+        t.re.lastIndex = 0;
+        if (t.re.test(text)) return t.raw;
+      }
+    }
+    return null;
+  }
+
+  // Blacklist an IP that tripped a trigger. Mode 'blocklist' adds it to
+  // blocklist.txt (and memory) permanently; mode 'temp' is an in-memory block
+  // for TRIGGER_BLOCK_DURATION_MS. Whitelisted IPs are never blocked.
+  autoBlockIP(ipAddress, triggerRaw) {
+    const cleanIp = (ipAddress || '').replace(/^::ffff:/i, '');
+    if (!cleanIp) return { blocked: false };
+    if (this.isIPWhitelisted(ipAddress)) return { blocked: false, whitelisted: true };
+
+    const tb = this.config.triggerBlock || {};
+    const reason = `auto-block: trigger ${JSON.stringify(triggerRaw)}`;
+    this.autoBlockCount++;
+
+    if (tb.mode === 'temp') {
+      this.blockIP(cleanIp, tb.durationMs || 86400000, reason);
+      return { blocked: true, mode: 'temp' };
+    }
+
+    // Default: 'blocklist' — effective immediately in memory, persisted to file.
+    const already = this.blocklist.has(cleanIp);
+    this.blocklist.add(cleanIp);
+
+    let persisted = false;
+    if (!already && this.config.blocklistPath) {
+      try {
+        fs.appendFileSync(
+          path.resolve(this.config.blocklistPath),
+          `${cleanIp}  # ${reason} ${new Date().toISOString()}\n`
+        );
+        persisted = true;
+      } catch (err) {
+        logger.error(`Failed to persist auto-block for ${cleanIp}: ${err.message}`);
+      }
+    }
+
+    logger.warn(`Auto-blocked ${cleanIp} (${reason})${persisted ? ' — added to blocklist.txt' : ''}`);
+    return { blocked: true, mode: 'blocklist', persisted };
   }
 
   isIPWhitelisted(ipAddress) {
@@ -311,6 +468,8 @@ class IPFilter {
       temporarilyBlockedIPs: this.blockedIPs.size,
       trackedIPs: this.connectionAttempts.size,
       activeIPConnections: this.activeConnectionsByIP.size,
+      triggerCount: this.triggers.length,
+      autoBlocked: this.autoBlockCount,
     };
   }
 
@@ -335,4 +494,4 @@ function getIPFilter() {
   return ipFilterInstance;
 }
 
-module.exports = { initializeIPFilter, getIPFilter };
+module.exports = { initializeIPFilter, getIPFilter, validateTriggerText };

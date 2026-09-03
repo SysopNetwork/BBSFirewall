@@ -7,17 +7,36 @@
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
+const { https } = require('follow-redirects');
 const { execSync } = require('child_process');
+
+// Load .env so MAXMIND_LICENSE_KEY can be set there instead of on the command line.
+// override: true so the file wins over a stale value in the inherited environment.
+require('dotenv').config({ quiet: true, override: true });
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'GeoLite2-Country.mmdb');
+
+// --force / --update: replace an existing database instead of stopping.
+const FORCE = process.argv.slice(2).some((a) => a === '--force' || a === '--update');
 
 console.log('=== BBSFirewall - GeoIP Database Setup ===\n');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   console.log('Created data directory');
+}
+
+if (fs.existsSync(DB_PATH) && FORCE) {
+  const stats = fs.statSync(DB_PATH);
+  const age = Math.floor((Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24));
+  console.log(`Replacing existing database (${age} days old)...`);
+  try {
+    fs.unlinkSync(DB_PATH);
+  } catch (err) {
+    console.error(`Could not remove the old database: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 if (fs.existsSync(DB_PATH)) {
@@ -30,7 +49,7 @@ if (fs.existsSync(DB_PATH)) {
     console.log('\nWarning: Database is older than 30 days. Consider updating it.');
   }
 
-  console.log('\nTo update, delete the file and run this script again.');
+  console.log('\nTo update, re-run with --force (or delete the file and run again).');
   process.exit(0);
 }
 
@@ -42,10 +61,11 @@ console.log('  3. Extract GeoLite2-Country.mmdb to:');
 console.log(`     ${DB_PATH}\n`);
 
 console.log('Option 2: Use a license key (if you have one)');
-console.log('  Set MAXMIND_LICENSE_KEY and run:');
-console.log('  MAXMIND_LICENSE_KEY=your_key node download-geoip.js\n');
+console.log('  Add MAXMIND_LICENSE_KEY=your_key to your .env file, then run:');
+console.log('  npm run setup-geoip\n');
+console.log('  (or pass it inline: MAXMIND_LICENSE_KEY=your_key node download-geoip.js)\n');
 
-const licenseKey = process.env.MAXMIND_LICENSE_KEY;
+const licenseKey = (process.env.MAXMIND_LICENSE_KEY || '').trim();
 
 if (licenseKey) {
   console.log('License key detected, attempting download...\n');

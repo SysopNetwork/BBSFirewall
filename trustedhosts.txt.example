@@ -1,0 +1,26 @@
+# BBSFirewall - Config Editor Trusted Hosts
+#
+# The web config editor is DENIED to every address that is not matched here.
+# This file is the first gate; the username/password login is the second.
+#
+# One IP or CIDR per line. IPv4 and IPv6 are both supported. Lines starting
+# with # are comments; an inline # comment after an entry is also allowed.
+#
+# IMPORTANT: if this file is missing or has no entries, the editor refuses
+# ALL requests. Add at least one entry before enabling CONFIG_EDITOR_ENABLED.
+#
+# Examples:
+#   203.0.113.10           a single admin workstation
+#   198.51.100.0/24        an office range
+#   10.0.0.0/8             a private LAN
+#   2001:db8:abcd::/48     an IPv6 range
+#   ::1                    localhost (IPv6)
+#   127.0.0.1              localhost (IPv4)
+#
+# To use this file:
+# 1. Copy to trustedhosts.txt
+# 2. Add the IPs / ranges you will administer the firewall from
+# 3. Set CONFIG_EDITOR_TRUSTEDHOSTS_PATH=./trustedhosts.txt in your .env
+
+# 203.0.113.10
+# 198.51.100.0/24

@@ -12,16 +12,20 @@
 const net = require('net');
 const { config, validateConfig } = require('./config');
 const logger = require('./logger');
+const fileLogger = require('./file-logger');
+const metrics = require('./metrics');
 const { handleConnection } = require('./proxy');
 const { initializeGeoIP } = require('./geoip');
 const { initializeIPFilter } = require('./ipfilter');
 const { startSSHServer } = require('./ssh');
 const { startWebRedirectServer, stopWebRedirectServer } = require('./web-redirect');
+const { startConfigEditorServer, stopConfigEditorServer } = require('./config-editor');
 
 class BBSFirewall {
   constructor() {
     this.server = null;
     this.sshServer = null;
+    this.sshPassthroughServer = null;
     this.activeConnections = 0;
   }
 
@@ -58,7 +62,8 @@ class BBSFirewall {
       blocklistPath: config.blocklistPath || 'none',
       proxyProtocolEnabled: config.proxyProtocolEnabled,
       webRedirectEnabled: config.webRedirectEnabled,
-      sshEnabled: config.sshEnabled,
+      sshMode: config.sshMode,
+      fileLog: config.fileLog.enabled ? `on (default: ${config.fileLog.defaultLevel})` : 'off',
     };
 
     if (config.webRedirectEnabled) {
@@ -70,15 +75,25 @@ class BBSFirewall {
       configLog.httpsCertPath = config.httpsCertPath;
     }
 
-    if (config.sshEnabled) {
+    configLog.configEditorEnabled = config.configEditor.enabled;
+    if (config.configEditor.enabled) {
+      configLog.configEditorPort = config.configEditor.port;
+    }
+
+    if (config.sshMode === 'terminate') {
       configLog.sshListenPort = config.sshListenPort;
       configLog.sshCiphers = config.sshCiphers.join(', ');
+    } else if (config.sshMode === 'passthrough') {
+      configLog.sshListenPort = config.sshListenPort;
+      configLog.sshBackend = `${config.sshBackendHost}:${config.sshBackendPort}`;
     }
 
     logger.info('Configuration:', configLog);
 
     this.server = net.createServer((clientSocket) => {
-      this.handleNewConnection(clientSocket);
+      this.handleNewConnection(clientSocket, config.backendHost, config.backendPort, {
+        proxyName: 'telnet',
+      });
     });
 
     this.server.on('error', (err) => {
@@ -94,22 +109,67 @@ class BBSFirewall {
       logger.info(`Forwarding connections to ${config.backendHost}:${config.backendPort}`);
     });
 
-    this.sshServer = startSSHServer(config, this);
+    this.startSSH();
 
     // Start web redirect server if enabled
     startWebRedirectServer();
 
+    // Start the web config editor if enabled
+    startConfigEditorServer();
+
     this.setupGracefulShutdown();
   }
 
-  handleNewConnection(clientSocket) {
+  // Bring up whichever SSH frontend the config selected. Both listen on
+  // SSH_LISTEN_PORT, so only one runs at a time.
+  startSSH() {
+    if (config.sshMode === 'terminate') {
+      this.sshServer = startSSHServer(config, this);
+      return;
+    }
+
+    if (config.sshMode === 'passthrough') {
+      const log = logger.getLogger('ssh-passthrough');
+
+      this.sshPassthroughServer = net.createServer((clientSocket) => {
+        this.handleNewConnection(clientSocket, config.sshBackendHost, config.sshBackendPort, {
+          proxyName: 'ssh-passthrough',
+          proxyProtocol: config.sshProxyProtocol,
+          encodingDetection: false, // encrypted stream — nothing to sniff
+        });
+      });
+
+      this.sshPassthroughServer.on('error', (err) => {
+        log.error(`SSH passthrough server error: ${err.message}`);
+        if (err.code === 'EADDRINUSE') {
+          log.error(`SSH port ${config.sshListenPort} is already in use`);
+          process.exit(1);
+        }
+      });
+
+      this.sshPassthroughServer.listen(config.sshListenPort, () => {
+        log.info(`SSH passthrough listening on port ${config.sshListenPort}`);
+        log.info(`Forwarding encrypted SSH to ${config.sshBackendHost}:${config.sshBackendPort}`);
+      });
+      return;
+    }
+
+    logger.info('SSH is disabled (SSH_MODE=off)');
+  }
+
+  handleNewConnection(clientSocket, backendHost, backendPort, options = {}) {
+    const proxyName = options.proxyName || 'telnet';
+
     if (this.activeConnections >= config.maxConnections) {
-      logger.warn(`Connection rejected: max connections (${config.maxConnections}) reached`);
+      const log = logger.getLogger(proxyName);
+      log.blocked(`Connection rejected: max connections (${config.maxConnections}) reached`);
+      metrics.incRejected();
       clientSocket.end();
       return;
     }
 
     this.activeConnections++;
+    metrics.incActive(proxyName);
     logger.debug(`Active connections: ${this.activeConnections}`);
 
     if (config.connectionTimeout > 0) {
@@ -120,10 +180,11 @@ class BBSFirewall {
       });
     }
 
-    handleConnection(clientSocket, config.backendHost, config.backendPort);
+    handleConnection(clientSocket, backendHost, backendPort, options);
 
     clientSocket.on('close', () => {
       this.activeConnections--;
+      metrics.decActive(proxyName);
       logger.debug(`Active connections: ${this.activeConnections}`);
     });
   }
@@ -133,6 +194,7 @@ class BBSFirewall {
       logger.info('Shutting down gracefully...');
 
       await stopWebRedirectServer();
+      await stopConfigEditorServer();
 
       let serversToClose = 0;
       let serversClosed = 0;
@@ -140,6 +202,7 @@ class BBSFirewall {
       const onClose = () => {
         serversClosed++;
         if (serversClosed === serversToClose) {
+          fileLogger.closeAll();
           process.exit(0);
         }
       };
@@ -160,13 +223,23 @@ class BBSFirewall {
         });
       }
 
+      if (this.sshPassthroughServer) {
+        serversToClose++;
+        this.sshPassthroughServer.close(() => {
+          logger.info('SSH passthrough server closed');
+          onClose();
+        });
+      }
+
       if (serversToClose === 0) {
+        fileLogger.closeAll();
         process.exit(0);
       }
 
       // Force shutdown after 10 seconds if servers don't close cleanly
       setTimeout(() => {
         logger.warn('Forcing shutdown after timeout');
+        fileLogger.closeAll();
         process.exit(1);
       }, 10000);
     };
