@@ -32,6 +32,7 @@ class ProxyConnection {
     this.terminalType = null;
     this.clientIp = null;           // set in connect() once validated
     this.connectionTracked = false; // true when trackConnectionOpen has been called
+    this.connectTimer = null;       // backend connect deadline (cleared on connect/cleanup)
 
     // Auto-block trigger scanning — telnet only (an encrypted SSH passthrough
     // stream has nothing plaintext to match). Disabled for whitelisted IPs in
@@ -135,10 +136,22 @@ class ProxyConnection {
       this.log.info(`[${this.connectionId}] Using backend port ${actualBackendPort} for encoding: ${this.detectedEncoding}`);
     }
 
+    // Give up if the backend TCP connection does not establish in time. Without
+    // this, a backend that silently drops SYN leaves the client paused and
+    // holding a global + per-IP connection slot until the OS TCP timeout.
+    if (config.backendConnectTimeout > 0) {
+      this.connectTimer = setTimeout(() => {
+        this.log.blocked(`[${this.connectionId}] Backend connect timed out after ` +
+          `${config.backendConnectTimeout}ms (${this.backendHost}:${actualBackendPort})`);
+        this.cleanup('backend-connect-timeout');
+      }, config.backendConnectTimeout);
+    }
+
     this.backendSocket = net.createConnection({
       host: this.backendHost,
       port: actualBackendPort,
     }, () => {
+      if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
       const backendAddr = `${this.backendSocket.remoteAddress}:${this.backendSocket.remotePort}`;
       const localAddr = `${this.backendSocket.localAddress}:${this.backendSocket.localPort}`;
       this.log.connection(`[${this.connectionId}] Connected to backend ${backendAddr} (from ${localAddr})`);
@@ -227,6 +240,7 @@ class ProxyConnection {
       }
 
       this.bytesFromClient += data.length;
+      metrics.incBytes('fromClient', data.length);
       const preview = data.toString('hex').substring(0, 60);
       this.log.debug(`[${this.connectionId}] Client → Backend: ${data.length} bytes [${preview}${data.length > 30 ? '...' : ''}]`);
       if (this.backendSocket && !this.backendSocket.destroyed) {
@@ -243,6 +257,7 @@ class ProxyConnection {
 
     this.backendSocket.on('data', (data) => {
       this.bytesFromBackend += data.length;
+      metrics.incBytes('fromBackend', data.length);
       const preview = data.toString('hex').substring(0, 60);
       this.log.debug(`[${this.connectionId}] Backend → Client: ${data.length} bytes [${preview}${data.length > 30 ? '...' : ''}]`);
       if (this.clientSocket && !this.clientSocket.destroyed) {
@@ -285,6 +300,8 @@ class ProxyConnection {
   cleanup(reason) {
     if (this.isCleanedUp) return;
     this.isCleanedUp = true;
+
+    if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
 
     // Release the per-IP connection slot regardless of how the connection ended
     if (this.connectionTracked && this.clientIp) {

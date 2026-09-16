@@ -10,6 +10,11 @@
 // The web config editor rewrites this file and restarts, so the file must win.
 require('dotenv').config({ quiet: true, override: true });
 
+// Only for the cheap existence check in validateConfig() below — avoids
+// duplicating the .admin-security.json path constant. security.js does no
+// crypto work just to answer secretsExist(), so this stays a fast require.
+const security = require('./security');
+
 // Valid per-proxy file-logging verbosity tiers, lowest to highest.
 const FILE_LOG_LEVELS = ['off', 'blocked', 'connections', 'info', 'debug'];
 
@@ -46,6 +51,12 @@ const config = {
 
   // Connection timeout in milliseconds (0 to disable)
   connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT || '300000', 10),
+
+  // How long to wait for the backend TCP connection to establish before giving
+  // up on a session (ms, 0 to disable). Without this, a backend that silently
+  // drops SYN leaves the client paused, holding a global + per-IP slot, until
+  // the OS TCP timeout (~20-120s).
+  backendConnectTimeout: parseInt(process.env.BACKEND_CONNECT_TIMEOUT_MS || '10000', 10),
 
   // Country blocking — comma-separated ISO 3166-1 alpha-2 codes (e.g. CN,RU,KP)
   blockedCountries: process.env.BLOCKED_COUNTRIES
@@ -113,15 +124,16 @@ const config = {
   // own TLS certificate for editing this .env and the whitelist/blocklist/
   // trustedhosts files. Gated by BOTH a trusted-host allowlist
   // (TRUSTEDHOSTS.TXT, IPv4/IPv6 CIDR — empty means nobody) and a
-  // username/password login. Run setup-config-cert.sh for the certificate.
+  // username/password + optional MFA login (node setup-admin.js, security.js).
+  // Run setup-config-cert.sh for the certificate.
   configEditor: {
     enabled: process.env.CONFIG_EDITOR_ENABLED === 'true',
     port: parseInt(process.env.CONFIG_EDITOR_PORT || '8443', 10),
     bindAddress: process.env.CONFIG_EDITOR_BIND || '0.0.0.0',
     certPath: process.env.CONFIG_EDITOR_CERT_PATH || './certs/config-editor/fullchain.pem',
     keyPath: process.env.CONFIG_EDITOR_KEY_PATH || './certs/config-editor/privkey.pem',
-    username: process.env.CONFIG_EDITOR_USERNAME || '',
-    password: process.env.CONFIG_EDITOR_PASSWORD || '',
+    // Admin username/password + MFA live in .admin-security.json (security.js),
+    // not .env — see setup-admin.js and the "Config Editor" ENV_SCHEMA help text.
     trustedHostsPath: process.env.CONFIG_EDITOR_TRUSTEDHOSTS_PATH || './trustedhosts.txt',
     sessionTimeoutMs: parseInt(process.env.CONFIG_EDITOR_SESSION_TIMEOUT_MS || '1800000', 10),
     envPath: process.env.CONFIG_EDITOR_ENV_PATH || './.env',
@@ -130,20 +142,41 @@ const config = {
     // when it runs setup-config-cert.sh for this editor's own certificate.
     certDomain: process.env.CONFIG_EDITOR_CERT_DOMAIN || '',
     certEmail: process.env.CONFIG_EDITOR_CERT_EMAIL || '',
+    // Answer plain-HTTP requests that land on the editor's HTTPS port with a
+    // 301 to the https:// URL, instead of failing the TLS handshake
+    // (ERR_EMPTY_RESPONSE). Same port — no extra listener. On by default; set
+    // CONFIG_EDITOR_HTTP_REDIRECT_ENABLED=false to just drop such requests.
+    httpRedirectEnabled: process.env.CONFIG_EDITOR_HTTP_REDIRECT_ENABLED !== 'false',
+  },
+
+  // Management API — key-authenticated REST access to everything the config
+  // editor UI can do, on the editor's own HTTPS listener under /api/*. Off by
+  // default. Needs configEditor.enabled (the API has no listener of its own).
+  // API_TRUSTEDHOSTS_PATH is an OPTIONAL source-IP allowlist: empty or missing
+  // means any IP may call the API (the key still applies), unlike the editor's
+  // fail-closed trustedhosts.txt.
+  api: {
+    enabled: process.env.API_ENABLED === 'true',
+    key: process.env.API_KEY || '',
+    trustedHostsPath: process.env.API_TRUSTEDHOSTS_PATH || './api-trustedhosts.txt',
   },
 
   // Console logging level: debug, info, warn, error
   logLevel: process.env.LOG_LEVEL || 'info',
 
   // Per-proxy file logging — daily-rotated file per proxy service in its own
-  // subfolder under LOG_DIR. LOG_FILE_ENABLED is the master switch; each proxy
-  // inherits LOG_FILE_LEVEL unless it sets its own <PROXY>_LOG_LEVEL, and can
-  // be turned off individually with <PROXY>_LOG_ENABLED=false.
+  // subfolder under LOG_DIR. LOG_FILE_ENABLED is the master switch (on by
+  // default — set LOG_FILE_ENABLED=false to turn it off); each proxy inherits
+  // LOG_FILE_LEVEL unless it sets its own <PROXY>_LOG_LEVEL, and can be turned
+  // off individually with <PROXY>_LOG_ENABLED=false.
   // Levels (each includes those below): off, blocked, connections, info, debug.
+  // Retention (LOG_RETENTION_DAYS, 1-3650) is safe to leave on by default
+  // because file-logger.js prunes files older than it once a day.
   fileLog: {
-    enabled: process.env.LOG_FILE_ENABLED === 'true',
+    enabled: process.env.LOG_FILE_ENABLED !== 'false',
     dir: process.env.LOG_DIR || './logs',
-    defaultLevel: (process.env.LOG_FILE_LEVEL || 'blocked').toLowerCase(),
+    defaultLevel: (process.env.LOG_FILE_LEVEL || 'connections').toLowerCase(),
+    retentionDays: parseInt(process.env.LOG_RETENTION_DAYS, 10) || 30,
     proxies: {
       telnet:            resolveProxyLog('TELNET'),
       ssh:               resolveProxyLog('SSH'),
@@ -263,13 +296,8 @@ function validateConfig() {
     if (config.sshMode !== 'off' && ce.port === config.sshListenPort) {
       errors.push('CONFIG_EDITOR_PORT must differ from SSH_LISTEN_PORT');
     }
-    if (!ce.username) {
-      errors.push('CONFIG_EDITOR_USERNAME is required when CONFIG_EDITOR_ENABLED is true');
-    }
-    if (!ce.password) {
-      errors.push('CONFIG_EDITOR_PASSWORD is required when CONFIG_EDITOR_ENABLED is true');
-    } else if (ce.password.length < 8) {
-      errors.push('CONFIG_EDITOR_PASSWORD must be at least 8 characters');
+    if (!security.secretsExist()) {
+      errors.push('No admin account configured for the config editor — run "node setup-admin.js" first');
     }
     if (!ce.certPath) {
       errors.push('CONFIG_EDITOR_CERT_PATH is required when CONFIG_EDITOR_ENABLED is true');
@@ -279,6 +307,21 @@ function validateConfig() {
     }
     if (ce.sessionTimeoutMs < 60000) {
       errors.push('CONFIG_EDITOR_SESSION_TIMEOUT_MS must be at least 60000');
+    }
+  }
+
+  if (!Number.isInteger(config.backendConnectTimeout) || config.backendConnectTimeout < 0) {
+    errors.push('BACKEND_CONNECT_TIMEOUT_MS must be 0 (disabled) or a positive integer');
+  }
+
+  if (config.api.enabled) {
+    if (!config.configEditor.enabled) {
+      errors.push('API_ENABLED requires CONFIG_EDITOR_ENABLED=true (the API shares the editor’s HTTPS listener)');
+    }
+    if (!config.api.key) {
+      errors.push('API_KEY is required when API_ENABLED is true');
+    } else if (config.api.key.length < 24) {
+      errors.push('API_KEY must be at least 24 characters');
     }
   }
 
@@ -315,6 +358,9 @@ function validateConfig() {
         errors.push(`${name} log level must be one of: ${FILE_LOG_LEVELS.join(', ')}`);
       }
     }
+  }
+  if (config.fileLog.retentionDays < 1 || config.fileLog.retentionDays > 3650) {
+    errors.push('LOG_RETENTION_DAYS must be between 1 and 3650');
   }
 
   if (errors.length > 0) {

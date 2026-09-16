@@ -46,6 +46,13 @@ class BBSFirewall {
 
     await initializeGeoIP();
     initializeIPFilter(config);
+    // Daily is plenty (retention granularity is whole days anyway) and this
+    // runs independently of the config editor, so pruning still happens even
+    // with CONFIG_EDITOR_ENABLED=false.
+    fileLogger.startPruning(24 * 60 * 60 * 1000);
+    // Server-side sampler so bandwidth avg/max stay meaningful even when no
+    // admin has the System Stats tab open (independent of its own 4s poll).
+    metrics.startBandwidthSampler(4000);
 
     const configLog = {
       listenPort: config.listenPort,

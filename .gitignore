@@ -12,11 +12,16 @@ blocklist.txt
 whitelist.txt
 trustedhosts.txt
 triggers.txt
+api-trustedhosts.txt
 
 # Config editor .env backups + carried-over session store
 .env.bak.*
 ENVBACKUPS/
 .config-editor-sessions.json
+
+# Admin password/MFA secrets store + its backups
+.admin-security.json
+.admin-security.json.bak.*
 
 # SSH host key
 ssh_host_key

@@ -178,7 +178,20 @@ function createSSHServer(config) {
             // backend stream.
             stream.pause();
 
+            // Give up if the backend TCP connection does not establish in time.
+            let connectTimer = config.backendConnectTimeout > 0 ? setTimeout(() => {
+              log.blocked(`SSH client ${clientIP}: backend connect timed out after ` +
+                `${config.backendConnectTimeout}ms (${config.backendHost}:${actualBackendPort})`);
+              stream.end();
+              if (!backendSocket.destroyed) backendSocket.destroy();
+            }, config.backendConnectTimeout) : null;
+            const clearConnectTimer = () => {
+              if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+            };
+            backendSocket.once('close', clearConnectTimer);
+
             backendSocket.connect(actualBackendPort, config.backendHost, () => {
+              clearConnectTimer();
               log.connection(`SSH client ${clientIP} connected to backend ${config.backendHost}:${actualBackendPort}`);
               backendSocket.setNoDelay(true);
 
@@ -224,6 +237,7 @@ function createSSHServer(config) {
               }
 
               bytesFromClient += data.length;
+              metrics.incBytes('fromClient', data.length);
 
               if (!backendSocket.writable || backendSocket.destroyed) {
                 log.debug(`Backend not writable, dropping ${data.length} bytes`);
@@ -242,6 +256,7 @@ function createSSHServer(config) {
 
             backendSocket.on('data', (data) => {
               bytesFromBackend += data.length;
+              metrics.incBytes('fromBackend', data.length);
 
               if (!stream.writable || stream.destroyed) {
                 log.debug(`SSH stream not writable, dropping ${data.length} bytes`);

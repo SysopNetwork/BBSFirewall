@@ -8,26 +8,36 @@ const path = require('path');
 const logger = require('./logger');
 
 function ipToInt(ip) {
-  const parts = ip.split('.');
+  const parts = String(ip).split('.');
   if (parts.length !== 4) return null;
-  return parts.reduce((acc, part) => (acc << 8) + parseInt(part, 10), 0) >>> 0;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const n = Number(part);
+    if (n > 255) return null;
+    value = (value * 256) + n;
+  }
+  return value >>> 0;
 }
 
+// IPv4-only. Returns false (not a string-equality fallback) for anything that
+// does not parse, so a malformed line can't accidentally match.
 function ipMatchesCIDR(ip, cidr) {
-  const [range, bits] = cidr.split('/');
+  const slash = cidr.indexOf('/');
+  if (slash === -1) return ip === cidr;
 
-  if (!bits) {
-    return ip === cidr;
-  }
+  const range = cidr.slice(0, slash);
+  const bitsStr = cidr.slice(slash + 1);
+  if (!/^\d{1,2}$/.test(bitsStr)) return false;
+  const bits = Number(bitsStr);
+  if (bits > 32) return false;
+  if (bits === 0) return true; // /0 matches every address
 
   const ipInt = ipToInt(ip);
   const rangeInt = ipToInt(range);
+  if (ipInt === null || rangeInt === null) return false;
 
-  if (ipInt === null || rangeInt === null) {
-    return ip === cidr;
-  }
-
-  const mask = (~0 << (32 - parseInt(bits, 10))) >>> 0;
+  const mask = (0xFFFFFFFF << (32 - bits)) >>> 0;
   return (ipInt & mask) === (rangeInt & mask);
 }
 
@@ -95,8 +105,14 @@ function validateTriggerText(text) {
 class IPFilter {
   constructor(config) {
     this.config = config;
+    // Exact IPs go in the Set (O(1) lookup); CIDR entries go in the *Cidr array
+    // and are the only ones the per-connection match loop has to walk. Without
+    // this split, a blocklist that grows (trigger auto-block in 'blocklist'
+    // mode appends forever) makes every allowed connection an O(N) scan.
     this.blocklist = new Set();
+    this.blocklistCidr = [];
     this.whitelist = new Set();
+    this.whitelistCidr = [];
     this.triggers = [];                    // compiled auto-block trigger patterns
     this.autoBlockCount = 0;               // IPs auto-blocked by a trigger this run
     this.connectionAttempts = new Map();   // IP -> [timestamps] — rate limit tracking
@@ -124,8 +140,8 @@ class IPFilter {
     }, 60000);
 
     logger.info('IP filter initialized', {
-      whitelistSize: this.whitelist.size,
-      blocklistSize: this.blocklist.size,
+      whitelistSize: this.whitelist.size + this.whitelistCidr.length,
+      blocklistSize: this.blocklist.size + this.blocklistCidr.length,
       rateLimitEnabled: this.config.rateLimitEnabled,
       maxConnectionsPerWindow: this.config.maxConnectionsPerWindow,
       rateLimitWindowMs: this.config.rateLimitWindowMs,
@@ -150,7 +166,10 @@ class IPFilter {
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
-        this.whitelist.add(trimmed);
+        const token = trimmed.split('#')[0].trim();
+        if (!token) continue;
+        if (token.includes('/')) this.whitelistCidr.push(token);
+        else this.whitelist.add(token);
         count++;
       }
 
@@ -175,7 +194,11 @@ class IPFilter {
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
-        this.blocklist.add(trimmed);
+        // A trailing "# reason timestamp" comment is written by autoBlockIP.
+        const token = trimmed.split('#')[0].trim();
+        if (!token) continue;
+        if (token.includes('/')) this.blocklistCidr.push(token);
+        else this.blocklist.add(token);
         count++;
       }
 
@@ -188,12 +211,14 @@ class IPFilter {
   reloadWhitelist() {
     if (!this.config.whitelistPath) return;
     this.whitelist.clear();
+    this.whitelistCidr = [];
     this.loadWhitelist(this.config.whitelistPath);
   }
 
   reloadBlocklist() {
     if (!this.config.blocklistPath) return;
     this.blocklist.clear();
+    this.blocklistCidr = [];
     this.loadBlocklist(this.config.blocklistPath);
   }
 
@@ -210,16 +235,27 @@ class IPFilter {
       let count = 0;
       let bad = 0;
 
+      let slow = 0;
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         const compiled = compileTrigger(trimmed);
-        if (compiled) { this.triggers.push(compiled); count++; }
-        else bad++;
+        if (!compiled) { bad++; continue; }
+        // Same ReDoS guard the config editor applies on save — a hand-edited
+        // triggers.txt bypasses that path, and matchTrigger() runs every
+        // pattern against every caller's first bytes.
+        if (compiled.kind === 'regex' &&
+            (compiled.re.source.length > 400 || NESTED_QUANT_RE.test(compiled.re.source))) {
+          slow++;
+          continue;
+        }
+        this.triggers.push(compiled);
+        count++;
       }
 
       logger.info(`Loaded ${count} auto-block trigger(s) from: ${fullPath}` +
-        (bad ? ` (${bad} unparseable line(s) skipped)` : ''));
+        (bad ? ` (${bad} unparseable line(s) skipped)` : '') +
+        (slow ? ` (${slow} pattern(s) skipped — catastrophic-backtracking regex)` : ''));
     } catch (err) {
       logger.error(`Failed to load trigger list: ${err.message}`);
     }
@@ -293,7 +329,7 @@ class IPFilter {
 
     if (this.whitelist.has(cleanIp) || this.whitelist.has(ipAddress)) return true;
 
-    for (const entry of this.whitelist) {
+    for (const entry of this.whitelistCidr) {
       if (ipMatchesCIDR(cleanIp, entry)) return true;
     }
 
@@ -307,7 +343,7 @@ class IPFilter {
 
     if (this.blocklist.has(cleanIp) || this.blocklist.has(ipAddress)) return true;
 
-    for (const entry of this.blocklist) {
+    for (const entry of this.blocklistCidr) {
       if (ipMatchesCIDR(cleanIp, entry)) return true;
     }
 
@@ -463,8 +499,8 @@ class IPFilter {
 
   getStats() {
     return {
-      whitelistSize: this.whitelist.size,
-      blocklistSize: this.blocklist.size,
+      whitelistSize: this.whitelist.size + this.whitelistCidr.length,
+      blocklistSize: this.blocklist.size + this.blocklistCidr.length,
       temporarilyBlockedIPs: this.blockedIPs.size,
       trackedIPs: this.connectionAttempts.size,
       activeIPConnections: this.activeConnectionsByIP.size,

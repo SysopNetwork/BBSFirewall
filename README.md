@@ -18,6 +18,8 @@ By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/S
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?logo=linux&logoColor=white)]()
 [![PM2](https://img.shields.io/badge/PM2-ready-2B037A?logo=pm2&logoColor=white)](https://pm2.keymetrics.io/)
 
+📋 **[See what's new in v1.3.5 →](CHANGELOG.md)**
+
 </div>
 
 ---
@@ -31,6 +33,10 @@ By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/S
 | 🌐 | **HTTPS Redirect** | Redirects both HTTP (port 80) and HTTPS (port 443) to a configured URL |
 | 🔑 | **Let's Encrypt** | Built-in cert setup script with auto-renewal, no downtime required |
 | 🛠️ | **Web Config Editor** | HTTPS admin UI (port 8443) to edit `.env` and IP lists; trusted-host + login gated |
+| 🔐 | **Two-Factor Auth** | TOTP authenticator app + one-time backup codes protect the admin UI, on top of scrypt-hashed passwords |
+| 📜 | **Log Viewer** | Browse, view, and delete per-proxy log files from the browser — automatically grouped by type, with anything older than 30 days folded into per-month sections |
+| 📊 | **System Stats** | Live CPU, memory, disk, and bandwidth metrics for the running firewall process |
+| 🔌 | **Management API** | Key-authenticated REST API to automate firewall configuration from your own tooling |
 | 📡 | **PROXY Protocol v1** | Passes the real client IP to the backend BBS (requires compatible backend) |
 | 🌍 | **Country Blocking** | Block connections by country using a local GeoIP database |
 | ✅ | **IP Whitelist** | Trusted IPs that bypass all firewall rules |
@@ -122,7 +128,8 @@ All settings live in `.env`. Copy `.env.example` to get started — every option
 </tr>
 <tr><td><code>MAX_CONNECTIONS</code></td><td>Maximum total simultaneous connections</td><td><code>100</code></td></tr>
 <tr><td><code>MAX_CONNECTIONS_PER_IP</code></td><td>Max simultaneous connections from a single IP (<code>0</code> = unlimited)</td><td><code>0</code></td></tr>
-<tr><td><code>CONNECTION_TIMEOUT</code></td><td>Connection timeout in milliseconds (<code>0</code> to disable)</td><td><code>300000</code></td></tr>
+<tr><td><code>CONNECTION_TIMEOUT</code></td><td>Idle connection timeout in milliseconds (<code>0</code> to disable)</td><td><code>300000</code></td></tr>
+<tr><td><code>BACKEND_CONNECT_TIMEOUT_MS</code></td><td>Max wait for the backend TCP connection to establish (<code>0</code> to disable)</td><td><code>10000</code></td></tr>
 </table>
 
 ### 🌍 Country Blocking
@@ -229,13 +236,25 @@ Scan the first bytes a telnet/SSH caller sends for known bot / scanner / exploit
 <tr><td><code>CONFIG_EDITOR_ENABLED</code></td><td>Enable the HTTPS web config editor</td><td><code>false</code></td></tr>
 <tr><td><code>CONFIG_EDITOR_PORT</code></td><td>Port the editor listens on (must differ from LISTEN_PORT / SSH port)</td><td><code>8443</code></td></tr>
 <tr><td><code>CONFIG_EDITOR_BIND</code></td><td>Address to bind the editor listener to</td><td><code>0.0.0.0</code></td></tr>
-<tr><td><code>CONFIG_EDITOR_USERNAME</code></td><td>Login username</td><td><em>(required)</em></td></tr>
-<tr><td><code>CONFIG_EDITOR_PASSWORD</code></td><td>Login password (minimum 8 characters)</td><td><em>(required)</em></td></tr>
 <tr><td><code>CONFIG_EDITOR_CERT_PATH</code></td><td>Path to the editor's TLS certificate (fullchain)</td><td><code>./certs/config-editor/fullchain.pem</code></td></tr>
 <tr><td><code>CONFIG_EDITOR_KEY_PATH</code></td><td>Path to the editor's TLS private key</td><td><code>./certs/config-editor/privkey.pem</code></td></tr>
 <tr><td><code>CONFIG_EDITOR_TRUSTEDHOSTS_PATH</code></td><td>IPv4/IPv6 CIDR allowlist file — empty/missing denies all</td><td><code>./trustedhosts.txt</code></td></tr>
 <tr><td><code>CONFIG_EDITOR_SESSION_TIMEOUT_MS</code></td><td>Idle session timeout (min 60000)</td><td><code>1800000</code></td></tr>
 <tr><td><code>CONFIG_EDITOR_PM2_APP</code></td><td>pm2 process name the Restart button acts on</td><td><code>bbsfirewall</code></td></tr>
+<tr><td><code>CONFIG_EDITOR_HTTP_REDIRECT_ENABLED</code></td><td>Answer plain-HTTP requests on the editor's own port with a 301 to <code>https://</code> (same port, no extra listener)</td><td><code>true</code></td></tr>
+</table>
+
+### 🔌 Management API
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>API_ENABLED</code></td><td>Enable the management API (requires <code>CONFIG_EDITOR_ENABLED=true</code>)</td><td><code>false</code></td></tr>
+<tr><td><code>API_KEY</code></td><td>Bearer key clients send; minimum 24 characters</td><td><em>(required when enabled)</em></td></tr>
+<tr><td><code>API_TRUSTEDHOSTS_PATH</code></td><td>Optional source-IP allowlist file; empty/missing = any IP (key still required)</td><td><code>./api-trustedhosts.txt</code></td></tr>
 </table>
 
 ### 📋 Logging
@@ -374,7 +393,7 @@ An HTTPS admin UI (default port **8443**) for editing `.env` and the whitelist /
 ### Two gates
 
 1. **Trusted-host allowlist** — `trustedhosts.txt`, one IPv4/IPv6 address or CIDR per line. Any address **not** matched is refused before the login page is even shown. An empty or missing file locks everyone out (fail-closed).
-2. **Login** — `CONFIG_EDITOR_USERNAME` / `CONFIG_EDITOR_PASSWORD` from `.env`, checked with a constant-time compare and exchanged for a short-lived, IP-bound session cookie (`HttpOnly`, `Secure`, `SameSite=Strict`). Failed logins lock the source IP for 15 minutes after 5 tries. Mutating requests also require a per-session CSRF token.
+2. **Login** — a scrypt-hashed password (`node setup-admin.js` creates it in `.admin-security.json`, kept out of `.env`), checked with a constant-time compare and exchanged for a short-lived, IP-bound session cookie (`HttpOnly`, `Secure`, `SameSite=Strict`). Optional MFA (TOTP + one-time backup codes) can be turned on from Security Settings in the header. Failed logins/MFA codes lock the source IP for 15 minutes after 5 tries. Mutating requests also require a per-session CSRF token.
 
 ### Setup
 
@@ -392,26 +411,30 @@ $EDITOR trustedhosts.txt
 # 3. Enable it in .env
 CONFIG_EDITOR_ENABLED=true
 CONFIG_EDITOR_PORT=8443
-CONFIG_EDITOR_USERNAME=admin
-CONFIG_EDITOR_PASSWORD=a-long-passphrase
 CONFIG_EDITOR_CERT_PATH=./certs/config-editor/fullchain.pem
 CONFIG_EDITOR_KEY_PATH=./certs/config-editor/privkey.pem
 CONFIG_EDITOR_TRUSTEDHOSTS_PATH=./trustedhosts.txt
 
-# 4. Restart
+# 4. Create the admin account (username/password no longer live in .env)
+node setup-admin.js
+
+# 5. Restart
 pm2 restart bbsfirewall
 ```
 
-Then browse to `https://your-host:8443/`.
+Then browse to `https://your-host:8443/`. Enable MFA (TOTP + backup codes) afterward
+from Security Settings, under your username in the top-right of the header.
 
 > **Expose the editor port directly.** The trusted-host gate matches the real TCP peer address — it deliberately ignores `X-Forwarded-For`. Behind a reverse proxy every request would appear to come from the proxy, breaking the gate; the editor logs a warning if it sees a forwarding header. For defence in depth, also restrict the port at the host firewall (`ufw allow from <admin-ip> to any port 8443`) or bind it to a private interface / `127.0.0.1` (SSH tunnel) with `CONFIG_EDITOR_BIND`.
 
 ### Tabs
 
-- **Settings** — the whole `.env`, grouped, with per-field help and a *more* toggle for longer explanations (e.g. SSH terminate vs passthrough).
+- **Settings** — the whole `.env`, grouped into collapsible sections with per-field help and a *more* toggle for longer explanations (e.g. SSH terminate vs passthrough).
+- **Lists** — the **Whitelist / Blocklist / Trusted Hosts / Triggers / API Trusted Hosts** editors, labeled by name, not filename, with "Add my IP" / "/24" / "/29" quick-add buttons on Whitelist and Blocklist.
 - **Tools** — one-click **download / update** of the MaxMind GeoIP database (needs `MAXMIND_LICENSE_KEY` saved), **generate an SSH host key** for terminate mode, and **issue a Let's Encrypt certificate** for the editor or the port-443 redirect (installs certbot if missing; console output shown on success or failure).
-- **Performance** — live CPU %, load average, memory, process RSS, disk, per-interface network throughput, and firewall counters (active connections, accepted/rejected, blocklist size, temp-blocked IPs). Auto-refreshes every 4s.
-- **whitelist.txt / blocklist.txt / trustedhosts.txt** — plain text editors for the list files.
+- **System Stats** — live CPU %, load average, memory, process RSS, disk, bandwidth (current/avg/peak), BBSFirewall folder and log-file disk usage, per-interface network throughput, and firewall counters (active connections, accepted/rejected, blocklist size, temp-blocked IPs). Auto-refreshes every 4s.
+- **Logs** — browse the per-proxy rotated log files written by `file-logger.js` (`LOG_FILE_ENABLED`, on by default — see Retention below). Files are grouped by proxy type, with anything older than 30 days automatically folded into per-month sections so a long-running board's log list stays readable instead of scrolling forever. View a file's content (large files are tailed to the last 512 KB) or permanently delete one.
+- **Security Settings** — under your username in the header: change your password, enable/disable MFA (TOTP QR code + one-time backup codes), regenerate backup codes, and whitelist your own IP.
 
 ### Behavior
 
@@ -421,11 +444,50 @@ Then browse to `https://your-host:8443/`.
 - Downloading/updating the GeoIP database and issuing the editor's own certificate both take effect live (no restart). Issuing the port-443 redirect certificate needs a restart.
 - The `setup-config-cert.sh` Let's Encrypt mode installs its own renewal hook; renew manually with `bash setup-config-cert.sh --renew`.
 
+### Plain-HTTP redirect
+
+A browser that visits `http://your-host:8443` (plain HTTP on the editor's HTTPS port) would otherwise fail the TLS handshake with `ERR_EMPTY_RESPONSE`. With `CONFIG_EDITOR_HTTP_REDIRECT_ENABLED=true` (the default) the editor peeks the first byte of each connection: a TLS handshake is served normally, and a plain-HTTP request gets a `301` to `https://<CONFIG_EDITOR_CERT_DOMAIN or the request's Host>:<port><path>`. Same port, no extra listener. Set it to `false` to just drop such requests.
+
 ### Certificate renewal
 
 ```bash
 bash setup-config-cert.sh --renew
 ```
+
+### Management API
+
+Enable `API_ENABLED=true` and set `API_KEY` (min 24 chars) to expose the same operations as the editor UI over REST, on the **same HTTPS port** under `/api/*`. Meant for a remote dashboard. The config editor must be enabled — the API has no listener of its own.
+
+> **Full reference, response shapes, and sample code (curl / Node / Python): [API.md](API.md).** A ready-to-run check is bundled as `api-smoke.sh`.
+
+**Auth** — every request carries the key, not a cookie:
+
+```
+Authorization: Bearer <API_KEY>          # or:   X-API-Key: <API_KEY>
+```
+
+The key is compared in constant time and never logged; 5 bad keys from one IP lock that IP out of the API for 15 minutes (its own counter — separate from the browser login). The API lane is **independent of `trustedhosts.txt`** — a caller does not need to be a trusted editor host — but you can narrow it by source IP with `api-trustedhosts.txt` (same file format; **empty or missing = any IP**, the key still applies). Edit it live from the `api-trustedhosts.txt` tab.
+
+| Method + path | Does |
+|---|---|
+| `GET /api/config` | Full `.env` (grouped, with the current list-file contents and `status.version`) |
+| `GET /api/health` | Cert/GeoIP/SSH host key health (Tools tab) |
+| `GET /api/stats` | Live host + firewall metrics (CPU, memory, disk, network, connection counters) |
+| `POST /api/save` | Write `.env` and/or the list files — same body the UI sends: `{"env":{"KEY":{"value":"...","enabled":true}},"files":{"blocklist":"..."}}`. Same backup → validate-in-child → restore-on-failure guard. |
+| `POST /api/restart` | `pm2 restart` the firewall |
+| `POST /api/geoip` | Download/update the MaxMind database (`{"action":"download"\|"update"}`) |
+| `POST /api/sshkey` | Generate the SSH host key (`{"type":"rsa"\|"ed25519","overwrite":false}`) |
+| `POST /api/cert` | Issue a Let's Encrypt certificate (`{"target":"editor"\|"redirect"}`) |
+
+```bash
+curl -s https://your-host:8443/api/stats -H "Authorization: Bearer $API_KEY"
+
+curl -s https://your-host:8443/api/save -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"env":{"BLOCKED_COUNTRIES":{"value":"CN,RU,KP","enabled":true}},"files":{}}'
+```
+
+> The API has the **same power as the admin UI** — including rewriting `.env` (its own `API_KEY`, the editor password, everything). A changed `API_KEY` or any `.env` mode change applies on the next restart, not immediately.
 
 ---
 
@@ -556,9 +618,13 @@ BBSFirewall/
 ├── ssh.js                 # SSH server — accepts any credentials, proxies to telnet
 ├── web-redirect.js        # HTTP + HTTPS redirect server with ACME challenge support
 ├── config-editor.js       # HTTPS web config editor (server, sessions, .env writer, tools, stats)
-├── config-editor-ui.js    # Config editor HTML views (login + app shell)
+├── config-editor-ui.js    # Config editor HTML views (login, MFA challenge, app shell)
+├── security.js            # Admin password (scrypt) + MFA (TOTP/backup codes) store
+├── wordlist.js            # Word list backing 4-word MFA backup codes
+├── setup-admin.js         # One-time admin account creation (node setup-admin.js)
+├── disable-mfa.js         # Emergency MFA disable (node disable-mfa.js --yes)
 ├── trustedhosts.js        # IPv4/IPv6 CIDR allowlist matching for the config editor
-├── metrics.js             # Shared live counters read by the config editor's Performance tab
+├── metrics.js             # Shared live counters read by the config editor's System Stats tab
 ├── proxy-protocol.js      # PROXY Protocol v1 header builder
 ├── config.js              # Configuration loading and validation
 ├── logger.js              # Log level filtering
@@ -568,13 +634,16 @@ BBSFirewall/
 ├── download-geoip.js      # GeoIP database setup helper
 ├── setup-certs.sh         # Let's Encrypt certificate setup script (web redirect)
 ├── setup-config-cert.sh   # TLS cert setup for the config editor (LE or self-signed)
+├── api-smoke.sh           # Management API smoke test
 ├── ecosystem.config.js    # PM2 process config
 ├── package.json
+├── API.md                 # Management API reference + sample code
 ├── .env.example           # Documented example configuration
 ├── whitelist.txt.example
 ├── blocklist.txt.example
 ├── trustedhosts.txt.example
 ├── triggers.txt.example
+├── api-trustedhosts.txt.example
 └── data/                  # GeoIP database (not included, run setup-geoip)
 ```
 

@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { https } = require('follow-redirects');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 // Load .env so MAXMIND_LICENSE_KEY can be set there instead of on the command line.
 // override: true so the file wins over a stale value in the inherited environment.
@@ -70,7 +70,7 @@ const licenseKey = (process.env.MAXMIND_LICENSE_KEY || '').trim();
 if (licenseKey) {
   console.log('License key detected, attempting download...\n');
 
-  const url = `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${licenseKey}&suffix=tar.gz`;
+  const url = `https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${encodeURIComponent(licenseKey)}&suffix=tar.gz`;
   const tarPath = path.join(DATA_DIR, 'GeoLite2-Country.tar.gz');
 
   console.log('Downloading...');
@@ -93,7 +93,7 @@ if (licenseKey) {
 
         try {
           console.log('Extracting...');
-          execSync(`tar -xzf "${tarPath}" -C "${DATA_DIR}"`, { stdio: 'pipe' });
+          execFileSync('tar', ['-xzf', tarPath, '-C', DATA_DIR], { stdio: 'pipe' });
 
           const files = fs.readdirSync(DATA_DIR);
           const extractedDir = files.find(f => f.startsWith('GeoLite2-Country_'));

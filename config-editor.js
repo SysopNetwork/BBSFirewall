@@ -24,23 +24,29 @@
  */
 
 const https = require('https');
+const net = require('net');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { promisify } = require('util');
 const { execFile, execFileSync } = require('child_process');
+const execFileAsync = promisify(execFile);
 
 const logger = require('./logger');
 const { config } = require('./config');
 const trustedhosts = require('./trustedhosts');
 const views = require('./config-editor-ui');
 const metrics = require('./metrics');
+const security = require('./security');
 
 const log = logger.getLogger('config-editor');
 
 const ABSOLUTE_SESSION_MS = 12 * 60 * 60 * 1000; // hard cap regardless of activity
 const LOGIN_MAX_FAILS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const MFA_MAX_FAILS = 5;
+const MFA_LOCK_MS = 15 * 60 * 1000;
 const MAX_BODY_BYTES = 512 * 1024;
 const ENV_BACKUPS_KEPT = 15;
 const ENV_BACKUP_DIRNAME = 'ENVBACKUPS';
@@ -52,14 +58,29 @@ const COOKIE_NAME = '__Host-bbsfw_admin';
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 const SECRET_FILE_MODE = 0o600;
 
-let server = null;
+// Site branding assets. A fixed, small map (not a general static-file route)
+// so there is no path-traversal surface — pathname is looked up, never joined
+// onto a filesystem path.
+const STATIC_ASSETS = {
+  '/favicon.ico': { file: path.join(__dirname, 'assets', 'favicon.ico'), type: 'image/x-icon' },
+  '/assets/logo.svg': { file: path.join(__dirname, 'assets', 'logo-dark.svg'), type: 'image/svg+xml' },
+};
+
+let server = null;      // the https.Server (services connections handed to it by muxServer)
+let muxServer = null;    // the net.Server that actually listens on CONFIG_EDITOR_PORT
 let sweepTimer = null;
 let lastCpuSample = null;   // for CPU-% deltas
 let lastNetSample = null;   // for network throughput deltas
 let proxyHeaderWarned = false;
 
-const sessions = new Map();   // token -> { username, ip, created, lastSeen, csrf }
-const loginFails = new Map(); // ip  -> { count, until }
+const sessions = new Map();   // token -> { username, ip, created, lastSeen, csrf, mfaVerified }
+const loginFails = new Map(); // ip  -> { count, until } — browser login
+const apiFails = new Map();   // ip  -> { count, until } — management API key (kept separate
+                              // so a dashboard flooding a bad key can't lock a human admin
+                              // out of the web UI from the same source IP)
+const mfaFails = new Map();   // ip  -> { count, until } — MFA code/backup-code attempts,
+                              // kept separate so guessing MFA codes can't also burn through
+                              // the (looser) password-lockout budget for the same IP
 const busy = new Set();       // in-flight mutating operations (one at a time)
 
 // ---------------------------------------------------------------------------
@@ -68,7 +89,7 @@ const busy = new Set();       // in-flight mutating operations (one at a time)
 // a dedicated widget.
 // ---------------------------------------------------------------------------
 const ENV_SCHEMA = [
-  { name: 'Network',
+  { name: 'Network', icon: 'network',
     help: 'Where the firewall listens for callers and which BBS it forwards them to.',
     fields: [
       { key: 'LISTEN_PORT', type: 'port', label: 'Telnet listen port', def: '23', required: true,
@@ -85,7 +106,7 @@ const ENV_SCHEMA = [
       { key: 'BACKEND_PORT_UTF8', type: 'port', label: 'UTF-8 backend port', def: '2423',
         help: 'Backend port for UTF-8/Unicode clients when encoding routing is on.' },
     ]},
-  { name: 'Connection Limits',
+  { name: 'Connection Limits', icon: 'limit',
     help: 'Caps on how many connections the firewall will carry at once.',
     fields: [
       { key: 'MAX_CONNECTIONS', type: 'int', label: 'Max total connections', def: '100', required: true,
@@ -95,7 +116,7 @@ const ENV_SCHEMA = [
       { key: 'CONNECTION_TIMEOUT', type: 'int', label: 'Idle timeout (ms, 0 = off)', def: '300000', required: true,
         help: 'Drop a connection after this many milliseconds with no traffic. 300000 = 5 minutes. 0 disables it.' },
     ]},
-  { name: 'Country Blocking',
+  { name: 'Country Blocking', icon: 'globe',
     help: 'Refuse callers by country using a local MaxMind GeoLite2 database. Needs the database downloaded (see the Tools tab) and a MaxMind license key.',
     fields: [
       { key: 'MAXMIND_LICENSE_KEY', type: 'secret', label: 'MaxMind license key', def: '',
@@ -105,15 +126,15 @@ const ENV_SCHEMA = [
       { key: 'BLOCK_UNKNOWN_COUNTRIES', type: 'bool', label: 'Block when country is unknown', def: 'false',
         help: 'Also refuse callers whose IP cannot be geolocated. Off by default so unusual-but-legitimate IPs still get through.' },
     ]},
-  { name: 'IP Lists',
-    help: 'Files listing IPs/CIDRs. Edit their contents on the whitelist.txt / blocklist.txt tabs.',
+  { name: 'IP Lists', icon: 'list',
+    help: 'Files listing IPs/CIDRs. Edit their contents in the Whitelist / Blocklist sections below.',
     fields: [
       { key: 'WHITELIST_PATH', type: 'string', label: 'Whitelist file path', def: './whitelist.txt',
         help: 'IPs in this file bypass every firewall rule — rate limit, per-IP cap, country block, and the blocklist.' },
       { key: 'BLOCKLIST_PATH', type: 'string', label: 'Blocklist file path', def: './blocklist.txt',
         help: 'IPs in this file are refused outright, permanently, unless also whitelisted.' },
     ]},
-  { name: 'Rate Limiting',
+  { name: 'Rate Limiting', icon: 'gauge',
     help: 'Flood protection: temporarily block an IP that reconnects too fast.',
     fields: [
       { key: 'RATE_LIMIT_ENABLED', type: 'bool', label: 'Enable rate limiting', def: 'true', required: true,
@@ -125,8 +146,8 @@ const ENV_SCHEMA = [
       { key: 'RATE_LIMIT_BLOCK_DURATION_MS', type: 'int', label: 'Block duration (ms)', def: '300000', required: true,
         help: 'How long an IP stays blocked after tripping the limit. 300000 = 5 minutes.' },
     ]},
-  { name: 'Auto-Block Triggers',
-    help: 'Scan the first bytes a caller sends for known bot / scanner / exploit strings and blacklist the source IP on a match. Edit the pattern list on the triggers.txt tab. Whitelisted IPs are never auto-blocked.',
+  { name: 'Auto-Block Triggers', icon: 'alert',
+    help: 'Scan the first bytes a caller sends for known bot / scanner / exploit strings and blacklist the source IP on a match. Edit the pattern list in the Triggers section below. Whitelisted IPs are never auto-blocked.',
     fields: [
       { key: 'TRIGGER_BLOCK_ENABLED', type: 'bool', label: 'Enable auto-block on trigger match', def: 'false',
         help: 'Off by default. A real caller who sends one of these strings in the first few bytes would be blocked too — keep the list tight.' },
@@ -139,14 +160,14 @@ const ENV_SCHEMA = [
       { key: 'TRIGGER_BLOCK_DURATION_MS', type: 'int', label: 'Temp block duration (ms)', def: '86400000',
         help: 'Used when mode is temp. 86400000 = 24 hours.' },
     ]},
-  { name: 'PROXY Protocol',
+  { name: 'PROXY Protocol', icon: 'exchange',
     help: 'Optional way to tell the backend the real caller IP.',
     fields: [
       { key: 'PROXY_PROTOCOL_ENABLED', type: 'bool', label: 'Send PROXY Protocol v1 to telnet backend', def: 'false',
         help: 'Prepend a PROXY v1 header so the BBS sees the caller’s IP instead of the firewall’s.',
         helpLong: 'Only enable this if the backend BBS (or a companion module) understands PROXY Protocol v1. Sent to a backend that does not, the header is read as session garbage and every connection breaks.' },
     ]},
-  { name: 'Web Redirect',
+  { name: 'Web Redirect', icon: 'redirect',
     help: 'Optional tiny web server so browsers that hit the firewall’s IP get bounced to your real site. Use the Tools tab to issue a Let’s Encrypt certificate for port 443.',
     fields: [
       { key: 'WEB_REDIRECT_ENABLED', type: 'bool', label: 'Enable HTTP (port 80) redirect', def: 'false',
@@ -166,8 +187,10 @@ const ENV_SCHEMA = [
       { key: 'HTTPS_CERT_EMAIL', type: 'string', label: 'Redirect cert contact email', def: '',
         help: 'Optional. Certbot sends expiry warnings here.' },
     ]},
-  { name: 'Config Editor',
-    help: 'This admin UI. Changing the port, credentials, or certificate takes effect after a restart.',
+  { name: 'Config Editor', icon: 'lock',
+    help: 'This admin UI. Changing the port or certificate takes effect after a restart. The admin ' +
+      'username/password and MFA are no longer set here — run "node setup-admin.js" once to create the ' +
+      'account, then use Security Settings (top-right of the header) to change the password or enable MFA.',
     fields: [
       { key: 'CONFIG_EDITOR_ENABLED', type: 'bool', label: 'Enable this editor', def: 'false', required: true,
         help: 'Turn the editor on. Disabling it here means you cannot get back in without SSH.' },
@@ -175,10 +198,6 @@ const ENV_SCHEMA = [
         help: 'HTTPS port for this UI. Must differ from LISTEN_PORT and the SSH port.' },
       { key: 'CONFIG_EDITOR_BIND', type: 'string', label: 'Bind address', def: '0.0.0.0',
         help: '0.0.0.0 listens on every interface; set a specific IP to limit it, or 127.0.0.1 to require an SSH tunnel.' },
-      { key: 'CONFIG_EDITOR_USERNAME', type: 'string', label: 'Editor username', def: '',
-        help: 'Login name for this UI.' },
-      { key: 'CONFIG_EDITOR_PASSWORD', type: 'secret', label: 'Editor password', def: '',
-        help: 'Login password, minimum 8 characters. Stored in .env; change it from the default immediately.' },
       { key: 'CONFIG_EDITOR_CERT_PATH', type: 'string', label: 'Editor cert path', def: './certs/config-editor/fullchain.pem',
         help: 'Fullchain PEM for this UI’s HTTPS. Written by setup-config-cert.sh / the Tools tab.' },
       { key: 'CONFIG_EDITOR_KEY_PATH', type: 'string', label: 'Editor key path', def: './certs/config-editor/privkey.pem',
@@ -188,24 +207,38 @@ const ENV_SCHEMA = [
       { key: 'CONFIG_EDITOR_CERT_EMAIL', type: 'string', label: 'Editor cert contact email', def: '',
         help: 'Optional certbot contact email for the editor certificate.' },
       { key: 'CONFIG_EDITOR_TRUSTEDHOSTS_PATH', type: 'string', label: 'Trusted hosts file path', def: './trustedhosts.txt',
-        help: 'File of IPs/CIDRs allowed to reach this UI at all. Edit its contents on the trustedhosts.txt tab. Empty = nobody.' },
+        help: 'File of IPs/CIDRs allowed to reach this UI at all. Edit its contents in the Trusted Hosts section below. Empty = nobody.' },
       { key: 'CONFIG_EDITOR_SESSION_TIMEOUT_MS', type: 'int', label: 'Session idle timeout (ms)', def: '1800000',
         help: 'Log an idle admin out after this long. 1800000 = 30 minutes. Minimum 60000.' },
+      { key: 'CONFIG_EDITOR_HTTP_REDIRECT_ENABLED', type: 'bool', label: 'Redirect plain HTTP to HTTPS', def: 'true',
+        help: 'On by default. When a browser hits this editor’s port with plain http:// (no TLS), answer with a 301 to the https:// URL instead of failing the handshake (ERR_EMPTY_RESPONSE). Same port — no extra listener. Set false to just drop such requests.' },
     ]},
-  { name: 'Logging',
-    help: 'Console verbosity and optional per-proxy log files.',
+  { name: 'Management API', icon: 'key',
+    help: 'Key-authenticated REST access to everything on this page (config, list files, restart, tools, stats) for a remote dashboard. Rides on this editor’s HTTPS port under /api/*, so the editor must be enabled. Authenticated by the bearer key below; optionally restricted by source IP in the API Trusted Hosts section below. This is a separate lane — an API caller does NOT need to be in trustedhosts.txt.',
+    fields: [
+      { key: 'API_ENABLED', type: 'bool', label: 'Enable the management API', def: 'false',
+        help: 'Needs this config editor enabled — the API has no listener of its own.' },
+      { key: 'API_KEY', type: 'secret', label: 'API bearer key', def: '',
+        help: 'Sent by clients as "Authorization: Bearer <key>" or "X-API-Key: <key>". Minimum 24 characters. Restart to apply a change.' },
+      { key: 'API_TRUSTEDHOSTS_PATH', type: 'string', label: 'API IP allowlist file', def: './api-trustedhosts.txt',
+        help: 'IPs/CIDRs allowed to call the API. Edit its contents in the API Trusted Hosts section below. Empty or missing = any IP may call (the key still applies).' },
+    ]},
+  { name: 'Logging', icon: 'file',
+    help: 'Console verbosity and per-proxy log files (on by default).',
     fields: [
       { key: 'LOG_LEVEL', type: 'enum', label: 'Console log level', def: 'info', options: ['debug', 'info', 'warn', 'error'],
         help: 'How much the process prints to its stdout/pm2 log. debug is very noisy.' },
-      { key: 'LOG_FILE_ENABLED', type: 'bool', label: 'Enable per-proxy file logging', def: 'false',
-        help: 'Also write a daily-rotated log file per proxy service under the log directory.' },
+      { key: 'LOG_FILE_ENABLED', type: 'bool', label: 'Enable per-proxy file logging', def: 'true',
+        help: 'Write a daily-rotated log file per proxy service under the log directory. On by default; old files are pruned automatically (see Retention below).' },
       { key: 'LOG_DIR', type: 'string', label: 'Log directory', def: './logs',
         help: 'Base directory for the per-proxy log folders.' },
-      { key: 'LOG_FILE_LEVEL', type: 'enum', label: 'Default file log level', def: 'blocked',
+      { key: 'LOG_FILE_LEVEL', type: 'enum', label: 'Default file log level', def: 'connections',
         options: ['off', 'blocked', 'connections', 'info', 'debug'],
         help: 'Event detail written to the files. Each level includes the ones before it: blocked → connections → info → debug.' },
+      { key: 'LOG_RETENTION_DAYS', type: 'int', label: 'Log retention (days)', def: '30',
+        help: 'Delete rotated log files older than this many days. 1-3650 (10 years). Checked once a day, so a lowered value can take up to 24h to take effect.' },
     ]},
-  { name: 'SSH',
+  { name: 'SSH', icon: 'terminal',
     help: 'Optional SSH front door on its own port. Pick a mode below — the two modes do very different things.',
     fields: [
       { key: 'SSH_MODE', type: 'enum', label: 'SSH mode', def: 'off', options: ['off', 'terminate', 'passthrough'],
@@ -350,18 +383,14 @@ function inlineValidate(map) {
     errors.push('CONFIG_EDITOR_PORT must differ from LISTEN_PORT');
   }
 
-  const ceOn = map.CONFIG_EDITOR_ENABLED && map.CONFIG_EDITOR_ENABLED.value === 'true';
-  if (ceOn) {
-    if (!map.CONFIG_EDITOR_USERNAME || !map.CONFIG_EDITOR_USERNAME.value) {
-      errors.push('CONFIG_EDITOR_USERNAME is required when the editor is enabled');
-    }
-    const pw = map.CONFIG_EDITOR_PASSWORD && map.CONFIG_EDITOR_PASSWORD.value;
-    if (!pw) errors.push('CONFIG_EDITOR_PASSWORD is required when the editor is enabled');
-    else if (pw.length < 8) errors.push('CONFIG_EDITOR_PASSWORD must be at least 8 characters');
-  }
-
   if (map.SSH_MODE && !['off', 'terminate', 'passthrough'].includes(map.SSH_MODE.value)) {
     errors.push('SSH_MODE must be one of: off, terminate, passthrough');
+  }
+
+  const retentionDays = asInt('LOG_RETENTION_DAYS');
+  if (retentionDays !== undefined && map.LOG_RETENTION_DAYS.value !== '' &&
+      (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650)) {
+    errors.push('LOG_RETENTION_DAYS must be an integer 1-3650');
   }
   return errors;
 }
@@ -486,10 +515,38 @@ function sendPage(res, status, buildHtml) {
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
     'Content-Security-Policy':
-      `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; ` +
+      `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src 'self'; ` +
       "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   });
   res.end(html);
+}
+
+// Cached on first read: these files ship with the release and never change
+// while the process runs, so there's no point re-reading disk on every hit.
+const staticAssetCache = new Map();
+function serveStaticAsset(res, pathname) {
+  const asset = STATIC_ASSETS[pathname];
+  if (!asset) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    return res.end('Not found');
+  }
+  let data = staticAssetCache.get(pathname);
+  if (!data) {
+    try {
+      data = fs.readFileSync(asset.file);
+    } catch (_) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('Not found');
+    }
+    staticAssetCache.set(pathname, data);
+  }
+  res.writeHead(200, {
+    'Content-Type': asset.type,
+    'Content-Length': data.length,
+    'Cache-Control': 'public, max-age=86400',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(data);
 }
 
 function redirect(res, location) {
@@ -513,11 +570,15 @@ function cookieHeader(token, maxAgeSec) {
 // session management
 // ---------------------------------------------------------------------------
 
-function createSession(username, ip) {
+// mfaVerified starts false when the account has MFA enabled (the router
+// gate below then restricts this session to the MFA-verify/logout routes
+// until it passes) and true otherwise, so the gate is a no-op when MFA is
+// off.
+function createSession(username, ip, mfaVerified) {
   const token = crypto.randomBytes(32).toString('hex');
   const csrf = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
-  sessions.set(token, { username, ip, created: now, lastSeen: now, csrf });
+  sessions.set(token, { username, ip, created: now, lastSeen: now, csrf, mfaVerified: !!mfaVerified });
   return { token, csrf };
 }
 
@@ -554,31 +615,44 @@ function sweepSessions() {
   for (const [ip, f] of loginFails) {
     if (now > f.until) loginFails.delete(ip);
   }
+  for (const [ip, f] of apiFails) {
+    if (now > f.until) apiFails.delete(ip);
+  }
+  for (const [ip, f] of mfaFails) {
+    if (now > f.until) mfaFails.delete(ip);
+  }
 }
 
-function loginLocked(ip) {
-  const f = loginFails.get(ip);
+function isLocked(map, ip, maxFails = LOGIN_MAX_FAILS) {
+  const f = map.get(ip);
   if (!f) return false;
-  if (Date.now() > f.until) { loginFails.delete(ip); return false; }
-  return f.count >= LOGIN_MAX_FAILS;
+  if (Date.now() > f.until) { map.delete(ip); return false; }
+  return f.count >= maxFails;
 }
 
-function recordLoginFail(ip) {
-  const f = loginFails.get(ip) || { count: 0, until: 0 };
+function recordFail(map, ip, lockMs = LOGIN_LOCK_MS) {
+  const f = map.get(ip) || { count: 0, until: 0 };
   f.count += 1;
-  f.until = Date.now() + LOGIN_LOCK_MS;
-  loginFails.set(ip, f);
+  f.until = Date.now() + lockMs;
+  map.set(ip, f);
 }
+
+const loginLocked = (ip) => isLocked(loginFails, ip);
+const recordLoginFail = (ip) => recordFail(loginFails, ip);
+const apiLocked = (ip) => isLocked(apiFails, ip);
+const recordApiFail = (ip) => recordFail(apiFails, ip);
+const mfaLocked = (ip) => isLocked(mfaFails, ip, MFA_MAX_FAILS);
+const recordMfaFail = (ip) => recordFail(mfaFails, ip, MFA_LOCK_MS);
 
 // ---------------------------------------------------------------------------
 // runtime status
 // ---------------------------------------------------------------------------
 
 let pm2Available = null;
-function hasPm2() {
+async function hasPm2() {
   if (pm2Available !== null) return pm2Available;
   try {
-    execFileSync('pm2', ['-v'], { stdio: 'pipe', timeout: 4000 });
+    await execFileAsync('pm2', ['-v'], { timeout: 4000 });
     pm2Available = true;
   } catch (_) {
     pm2Available = false;
@@ -592,6 +666,17 @@ function humanUptime(sec) {
   const h = Math.floor(sec / 3600); sec -= h * 3600;
   const m = Math.floor(sec / 60); sec -= m * 60;
   return [d && `${d}d`, h && `${h}h`, m && `${m}m`, `${sec}s`].filter(Boolean).join(' ');
+}
+
+let cachedVersion = null;
+function appVersion() {
+  if (cachedVersion !== null) return cachedVersion;
+  try {
+    cachedVersion = String(require('./package.json').version || '');
+  } catch (_) {
+    cachedVersion = '';
+  }
+  return cachedVersion;
 }
 
 function readFileSafe(p) {
@@ -629,15 +714,36 @@ function geoipStatus() {
   return out;
 }
 
-function sshHostKeyStatus() {
+// These two probes shell out (`ssh-keygen -l`, `openssl x509`). /api/config
+// folds them in via buildHealth(), and an API client may poll it — so cache the
+// results briefly. Tools actions that change a key/cert call invalidateHealthCache().
+const HEALTH_CACHE_TTL_MS = 4000;
+let sshHostKeyCache = null;       // { at, value }
+let certInfoCache = new Map();    // resolved path -> { at, value }
+
+function invalidateHealthCache() {
+  sshHostKeyCache = null;
+  certInfoCache = new Map();
+}
+
+async function sshHostKeyStatus() {
+  if (sshHostKeyCache && Date.now() - sshHostKeyCache.at < HEALTH_CACHE_TTL_MS) {
+    return sshHostKeyCache.value;
+  }
+  const value = await sshHostKeyStatusFresh();
+  sshHostKeyCache = { at: Date.now(), value };
+  return value;
+}
+
+async function sshHostKeyStatusFresh() {
   const keyPath = path.resolve(envFileValue('SSH_HOST_KEY') || config.sshHostKey || './ssh_host_key');
   const out = { path: keyPath, exists: false, fingerprint: null, type: null };
   try {
     fs.statSync(keyPath);
     out.exists = true;
     try {
-      const r = execFileSync('ssh-keygen', ['-l', '-f', keyPath], { stdio: 'pipe', timeout: 4000 })
-        .toString().trim();
+      const { stdout } = await execFileAsync('ssh-keygen', ['-l', '-f', keyPath], { timeout: 4000 });
+      const r = stdout.toString().trim();
       // "3072 SHA256:abc... comment (RSA)"
       const m = r.match(/^(\d+)\s+(\S+)\s+.*\((\w+)\)\s*$/);
       if (m) { out.fingerprint = m[2]; out.type = m[3]; }
@@ -647,14 +753,24 @@ function sshHostKeyStatus() {
   return out;
 }
 
-function certInfo(certPath) {
+async function certInfo(certPath) {
+  const abs = certPath ? path.resolve(certPath) : '';
+  const cached = certInfoCache.get(abs);
+  if (cached && Date.now() - cached.at < HEALTH_CACHE_TTL_MS) return cached.value;
+  const value = await certInfoFresh(certPath);
+  certInfoCache.set(abs, value);
+  return value;
+}
+
+async function certInfoFresh(certPath) {
   const out = { path: certPath, exists: false, subject: null, notAfter: null, daysLeft: null, selfSigned: null };
   let abs;
   try { abs = path.resolve(certPath); fs.statSync(abs); out.exists = true; }
   catch (_) { return out; }
   try {
-    const txt = execFileSync('openssl', ['x509', '-in', abs, '-noout', '-subject', '-issuer', '-enddate'],
-      { stdio: 'pipe', timeout: 4000 }).toString();
+    const { stdout } = await execFileAsync('openssl', ['x509', '-in', abs, '-noout', '-subject', '-issuer', '-enddate'],
+      { timeout: 4000 });
+    const txt = stdout.toString();
     const sub = txt.match(/^subject=(.*)$/m);
     const iss = txt.match(/^issuer=(.*)$/m);
     const end = txt.match(/^notAfter=(.*)$/m);
@@ -670,10 +786,10 @@ function certInfo(certPath) {
 }
 
 let certbotAvailable = null;
-function hasCertbot() {
+async function hasCertbot() {
   if (certbotAvailable !== null) return certbotAvailable;
   try {
-    execFileSync('certbot', ['--version'], { stdio: 'pipe', timeout: 5000 });
+    await execFileAsync('certbot', ['--version'], { timeout: 5000 });
     certbotAvailable = true;
   } catch (_) {
     certbotAvailable = false;
@@ -681,16 +797,25 @@ function hasCertbot() {
   return certbotAvailable;
 }
 
-function buildHealth() {
+// Runs the shelled-out probes concurrently — each is a separate child process,
+// so there is no reason to make a caller wait for them one after another (that
+// used to serialize up to ~4 blocking execFileSync calls behind /api/config,
+// stalling the Settings tab and header version behind whichever probe was
+// slowest AND blocking the Node event loop for every other connection while
+// any one of them ran).
+async function buildHealth() {
   const ce = config.configEditor;
+  const [sshHostKey, editorCert, redirectCert, certbotInstalled] = await Promise.all([
+    sshHostKeyStatus(),
+    certInfo(envFileValue('CONFIG_EDITOR_CERT_PATH') || ce.certPath),
+    certInfo(envFileValue('HTTPS_CERT_PATH') || config.httpsCertPath),
+    hasCertbot(),
+  ]);
   return {
     geoip: geoipStatus(),
-    sshHostKey: sshHostKeyStatus(),
-    certs: {
-      editor: certInfo(envFileValue('CONFIG_EDITOR_CERT_PATH') || ce.certPath),
-      redirect: certInfo(envFileValue('HTTPS_CERT_PATH') || config.httpsCertPath),
-    },
-    certbotInstalled: hasCertbot(),
+    sshHostKey,
+    certs: { editor: editorCert, redirect: redirectCert },
+    certbotInstalled,
     domains: {
       editor: envFileValue('CONFIG_EDITOR_CERT_DOMAIN') || '',
       redirect: envFileValue('HTTPS_CERT_DOMAIN') || '',
@@ -702,7 +827,13 @@ function buildHealth() {
 // ---------------------------------------------------------------------------
 // /api/config — current values for the form
 // ---------------------------------------------------------------------------
-function buildConfigPayload(session) {
+// Fast and synchronous except for hasPm2(), which is cached forever after its
+// first call (warmed at startup — see startConfigEditorServer) so this stays
+// non-blocking in practice. Health data (ssh-keygen/openssl/certbot probes)
+// lives behind the separate /api/health endpoint so a slow probe never delays
+// the Settings sections or the header version — see buildHealth().
+async function buildConfigPayload(session) {
+  const secrets = security.readSecrets();
   const envPath = path.resolve(config.configEditor.envPath);
   let envText = '';
   try { envText = fs.readFileSync(envPath, 'utf-8'); } catch (_) {}
@@ -711,6 +842,7 @@ function buildConfigPayload(session) {
   const sections = ENV_SCHEMA.map((sec) => ({
     name: sec.name,
     help: sec.help || null,
+    icon: sec.icon || null,
     fields: sec.fields.map((f) => {
       const active = Object.prototype.hasOwnProperty.call(parsed.active, f.key);
       return {
@@ -734,6 +866,7 @@ function buildConfigPayload(session) {
     ['blocklist', config.blocklistPath || './blocklist.txt'],
     ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
     ['triggers', config.triggerBlock.listPath || './triggers.txt'],
+    ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
   ]) {
     const r = readFileSafe(p);
     files[name] = { path: p, content: r.content, exists: r.exists };
@@ -744,12 +877,15 @@ function buildConfigPayload(session) {
     username: session.username,
     sections,
     files,
-    health: buildHealth(),
     status: {
       pid: process.pid,
+      version: appVersion(),
       uptimeHuman: humanUptime(process.uptime()),
-      pm2: hasPm2(),
+      pm2: await hasPm2(),
       envPath,
+      ip: session.ip,
+      mfaEnabled: !!(secrets && secrets.mfa && secrets.mfa.enabled),
+      backupCodesRemaining: secrets ? secrets.backupCodes.filter((c) => !c.usedAt).length : 0,
     },
   };
 }
@@ -821,6 +957,16 @@ async function doSave(req, res, session) {
     if (check.invalid.length) {
       return sendJson(res, 400, {
         error: 'trustedhosts.txt has unparseable lines: ' + check.invalid.slice(0, 5).join(', '),
+      });
+    }
+  }
+
+  // Same check for the API IP allowlist (same file format).
+  if (typeof filesInput.apihosts === 'string') {
+    const check = trustedhosts.validateText(filesInput.apihosts);
+    if (check.invalid.length) {
+      return sendJson(res, 400, {
+        error: 'api-trustedhosts.txt has unparseable lines: ' + check.invalid.slice(0, 5).join(', '),
       });
     }
   }
@@ -925,6 +1071,7 @@ async function doSave(req, res, session) {
     ['blocklist', config.blocklistPath || './blocklist.txt'],
     ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
     ['triggers', config.triggerBlock.listPath || './triggers.txt'],
+    ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
   ]) {
     if (typeof filesInput[name] !== 'string') continue;
     try {
@@ -941,6 +1088,8 @@ async function doSave(req, res, session) {
 
   // Reload the trusted-host allowlist so the change takes effect immediately.
   loadedTrustedHosts = trustedhosts.loadTrustedHosts(config.configEditor.trustedHostsPath);
+  // Same for the API IP allowlist.
+  loadedApiHosts = trustedhosts.loadTrustedHosts(config.api.trustedHostsPath);
 
   // Reload the ipfilter list files that changed, so edits apply without a restart.
   try {
@@ -972,7 +1121,8 @@ function persistSessions() {
   try {
     const out = [];
     for (const [token, s] of sessions) {
-      out.push({ token, username: s.username, ip: s.ip, created: s.created, lastSeen: s.lastSeen, csrf: s.csrf });
+      out.push({ token, username: s.username, ip: s.ip, created: s.created, lastSeen: s.lastSeen, csrf: s.csrf,
+        mfaVerified: !!s.mfaVerified });
     }
     fs.writeFileSync(SESSION_STORE, JSON.stringify({ savedAt: Date.now(), sessions: out }), { mode: 0o600 });
     return out.length;
@@ -1007,6 +1157,11 @@ function loadPersistedSessions() {
       created: s.created,
       lastSeen: s.lastSeen,
       csrf: s.csrf,
+      // Preserve MFA-verified status across the carry-over: this is the same
+      // already-authenticated admin restarting their own firewall, not a new
+      // login, so it should not re-challenge for MFA. Defaults to false (the
+      // safer state) for an older persisted session that predates this field.
+      mfaVerified: !!s.mfaVerified,
     });
     restored++;
   }
@@ -1026,7 +1181,7 @@ async function handleRestart(req, res, session) {
     if (body && body.keepSession === false) keepSession = false;
   } catch (_) { /* default keepSession = true */ }
 
-  if (!hasPm2()) {
+  if (!(await hasPm2())) {
     release('restart');
     return sendJson(res, 200, {
       ok: true,
@@ -1163,7 +1318,7 @@ async function handleSshKey(req, res, session) {
     release('sshkey');
     return sendJson(res, 409, {
       error: `A host key already exists at ${keyPath}. Re-run with "overwrite" to replace it (existing SSH clients will see a changed host key).`,
-      sshHostKey: sshHostKeyStatus(),
+      sshHostKey: await sshHostKeyStatus(),
     });
   }
 
@@ -1182,15 +1337,16 @@ async function handleSshKey(req, res, session) {
     : ['-t', 'rsa', '-b', '3072', '-m', 'PEM', '-N', '', '-C', 'bbsfirewall-host-key', '-f', keyPath];
 
   log.info(`SSH host key (${type}) generation requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
-  runAction('ssh-keygen', args, { timeout: 30000 }, (r) => {
+  runAction('ssh-keygen', args, { timeout: 30000 }, async (r) => {
     release('sshkey');
     if (r.ok) {
       try { fs.chmodSync(keyPath, 0o600); } catch (_) {}
+      invalidateHealthCache();
     }
     sendJson(res, r.ok ? 200 : 500, {
       ok: r.ok,
       output: r.output || (r.ok ? `Host key written to ${keyPath}` : 'ssh-keygen failed'),
-      sshHostKey: sshHostKeyStatus(),
+      sshHostKey: await sshHostKeyStatus(),
       note: r.ok ? 'Set SSH_MODE=terminate (if not already) and restart to use it.' : undefined,
     });
   });
@@ -1238,8 +1394,9 @@ async function handleCert(req, res, session) {
   if (email) args.push('--email', email);
 
   log.warn(`Let's Encrypt issuance for ${target} (${domain}) requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
-  runAction('bash', args, { timeout: ACTION_TIMEOUT_MS }, (r) => {
+  runAction('bash', args, { timeout: ACTION_TIMEOUT_MS }, async (r) => {
     release('cert');
+    if (r.ok) invalidateHealthCache();
     let reloaded = false;
     if (r.ok && target === 'editor') {
       reloaded = reloadEditorCert();
@@ -1250,14 +1407,15 @@ async function handleCert(req, res, session) {
     if (r.ok && target === 'redirect') {
       r.output += '\n\nCertificate issued. Restart the firewall to load it into the port-443 redirect.';
     }
+    const health = await buildHealth();
     sendJson(res, r.ok ? 200 : 400, {
       ok: r.ok,
       target,
       domain,
       exitCode: r.exitCode,
-      certbotInstalled: hasCertbot(),
+      certbotInstalled: health.certbotInstalled,
       output: r.output || (r.ok ? 'done' : 'certbot failed — see console output above'),
-      health: buildHealth(),
+      health,
     });
   });
 }
@@ -1345,6 +1503,43 @@ function diskInfo() {
   return null;
 }
 
+// Recursive size of the BBSFirewall install directory, excluding node_modules
+// and .git (the numbers a sysop actually cares about — "how much am I using
+// beyond dependencies I didn't put there") and symlinks (avoids cycles).
+// Cached briefly: a full recursive walk on every 4s /api/stats poll is real
+// disk I/O, especially once node_modules is excluded but everything else
+// (certs, ENVBACKUPS, data/, logs/) still gets walked.
+const FOLDER_SIZE_CACHE_MS = 60 * 1000;
+let folderSizeCache = null; // { at, bytes }
+const FOLDER_SIZE_EXCLUDE = new Set(['node_modules', '.git']);
+
+function folderSize(dir) {
+  let total = 0;
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return 0; }
+  for (const entry of entries) {
+    if (FOLDER_SIZE_EXCLUDE.has(entry.name)) continue;
+    if (entry.isSymbolicLink()) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      total += folderSize(full);
+    } else if (entry.isFile()) {
+      try { total += fs.statSync(full).size; } catch (_) {}
+    }
+  }
+  return total;
+}
+
+function cachedFolderSize() {
+  const now = Date.now();
+  if (folderSizeCache && now - folderSizeCache.at < FOLDER_SIZE_CACHE_MS) {
+    return folderSizeCache.bytes;
+  }
+  const bytes = folderSize(__dirname);
+  folderSizeCache = { at: now, bytes };
+  return bytes;
+}
+
 function handleStats(res) {
   const ipf = (() => {
     try { return require('./ipfilter').getIPFilter(); } catch (_) { return null; }
@@ -1355,6 +1550,7 @@ function handleStats(res) {
     now: Date.now(),
     host: {
       hostname: os.hostname(),
+      version: appVersion(),
       platform: process.platform,
       osUptimeSec: Math.floor(os.uptime()),
       procUptimeSec: Math.floor(process.uptime()),
@@ -1372,6 +1568,8 @@ function handleStats(res) {
     },
     network: networkRates(),
     disk: diskInfo(),
+    folder: { totalBytes: cachedFolderSize(), excludesNodeModules: true },
+    logsBytes: require('./file-logger').listLogFiles().reduce((sum, f) => sum + f.size, 0),
     firewall: {
       ...metrics.snapshot(),
       ipfilter: ipf && typeof ipf.getStats === 'function' ? ipf.getStats() : null,
@@ -1382,8 +1580,67 @@ function handleStats(res) {
 }
 
 // ---------------------------------------------------------------------------
+// /api/logs — view/delete the per-proxy rotated log files (file-logger.js).
+// Listing and viewing are plain reads; delete goes through the same one-at-a-
+// time busy lock as the other mutating Tools actions.
+// ---------------------------------------------------------------------------
+const LOG_VIEW_MAX_BYTES = 512 * 1024;
+
+function handleLogsList(res) {
+  try {
+    const files = require('./file-logger').listLogFiles();
+    return sendJson(res, 200, {
+      dir: path.resolve(config.fileLog.dir || './logs'),
+      enabled: !!config.fileLog.enabled,
+      files,
+    });
+  } catch (err) {
+    return sendJson(res, 500, { error: 'Could not list log files: ' + err.message });
+  }
+}
+
+function handleLogsView(res, query) {
+  const proxy = query.get('proxy') || '';
+  const file = query.get('file') || '';
+  try {
+    const result = require('./file-logger').readLogFile(proxy, file, { maxBytes: LOG_VIEW_MAX_BYTES });
+    return sendJson(res, 200, { proxy, file, ...result });
+  } catch (err) {
+    if (err.code === 'ENOENT') return sendJson(res, 404, { error: 'Log file not found' });
+    return sendJson(res, 400, { error: err.message });
+  }
+}
+
+async function handleLogsDelete(req, res, session) {
+  if (!acquire(res, 'logs')) return;
+  try {
+    let payload;
+    try { payload = JSON.parse((await readBody(req)) || '{}'); } catch (_) {
+      return sendJson(res, 400, { error: 'Invalid request body' });
+    }
+    const proxy = payload && payload.proxy;
+    const file = payload && payload.file;
+    require('./file-logger').deleteLogFile(proxy, file);
+    log.info(`Log file deleted by "${sanitizeForLog(session.username)}" from ${clientIp(req)}: ${proxy}/${file}`);
+    return sendJson(res, 200, { ok: true, proxy, file });
+  } catch (err) {
+    if (err.code === 'ENOENT') return sendJson(res, 404, { error: 'Log file not found' });
+    return sendJson(res, 400, { error: err.message });
+  } finally {
+    release('logs');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // login
 // ---------------------------------------------------------------------------
+// Fixed scrypt record used when no admin account exists yet, so
+// verifyPassword() still does real scrypt work and "no admin configured"
+// takes the same time as "wrong password" — never leaks setup state to an
+// unauthenticated caller. Computed once (the salt/params don't need to be
+// secret; nothing will ever match this hash).
+const DUMMY_PASSWORD_RECORD = security.hashPassword(crypto.randomBytes(32).toString('hex'));
+
 async function handleLoginPost(req, res, ip) {
   if (loginLocked(ip)) {
     return sendPage(res, 429, (n) => views.loginPage({ nonce: n, error: 'Too many failed attempts. Try again later.' }));
@@ -1394,19 +1651,23 @@ async function handleLoginPost(req, res, ip) {
   const username = form.get('username') || '';
   const password = form.get('password') || '';
 
-  // Evaluate both comparisons unconditionally (bitwise &, no short-circuit) so
+  const secrets = security.readSecrets();
+  const cfgUser = secrets ? secrets.username : '';
+  const passRecord = secrets ? secrets.password : DUMMY_PASSWORD_RECORD;
+  // Both checks always run (neither is short-circuited by the other) so
   // response time does not reveal whether the username alone was correct.
-  const cfgUser = config.configEditor.username;
-  const cfgPass = config.configEditor.password;
-  const ok = (safeEqual(username, cfgUser) & safeEqual(password, cfgPass)) === 1;
-  if (!ok || !cfgUser || !cfgPass) {
+  const userOk = safeEqual(username, cfgUser);
+  const passOk = security.verifyPassword(password, passRecord);
+  const ok = !!secrets && userOk && passOk;
+  if (!ok) {
     recordLoginFail(ip);
     log.blocked(`Failed config editor login for "${sanitizeForLog(username)}" from ${ip}`);
     return sendPage(res, 401, (n) => views.loginPage({ nonce: n, error: 'Invalid username or password.' }));
   }
 
   loginFails.delete(ip);
-  const { token } = createSession(username, ip);
+  const mfaEnabled = !!(secrets.mfa && secrets.mfa.enabled);
+  const { token } = createSession(username, ip, !mfaEnabled);
   const maxAge = Math.floor(ABSOLUTE_SESSION_MS / 1000);
   res.writeHead(302, {
     Location: '/',
@@ -1418,9 +1679,330 @@ async function handleLoginPost(req, res, ip) {
 }
 
 // ---------------------------------------------------------------------------
+// /api/security/* — MFA verification (completes login) + the Security
+// Settings self-service actions (change password, enable/disable MFA,
+// regenerate backup codes, whitelist my IP). Browser session lane only —
+// deliberately not exposed on the key-authenticated Management API.
+// ---------------------------------------------------------------------------
+
+// Marks the CALLER'S OWN in-memory session verified — `session` here is the
+// {token, ...} copy getSession() returns, not the object stored in the
+// sessions Map, so the Map entry has to be updated directly (or a fresh
+// login next request would still see mfaVerified:false).
+function markSessionMfaVerified(session) {
+  const stored = sessions.get(session.token);
+  if (stored) stored.mfaVerified = true;
+}
+
+async function handleMfaVerifyLogin(req, res, session, ip) {
+  if (mfaLocked(ip)) {
+    return sendJson(res, 429, { error: 'Too many failed attempts. Try again later.' });
+  }
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+
+  const secrets = security.readSecrets();
+  if (!secrets || !secrets.mfa || !secrets.mfa.enabled || !secrets.mfa.secret) {
+    // Shouldn't normally be reachable (mfaVerified starts true when MFA is
+    // off), but fail closed rather than silently accepting anything.
+    return sendJson(res, 400, { error: 'MFA is not enabled on this account.' });
+  }
+
+  let ok = false;
+  if (body.backupCode) {
+    ok = security.verifyAndConsumeBackupCode(secrets, String(body.backupCode));
+  } else if (body.code) {
+    ok = security.verifyTotp(secrets.mfa.secret, String(body.code));
+  }
+
+  if (!ok) {
+    recordMfaFail(ip);
+    log.blocked(`Failed MFA verification for "${sanitizeForLog(session.username)}" from ${ip}`);
+    return sendJson(res, 401, { error: 'Invalid code.' });
+  }
+
+  mfaFails.delete(ip);
+  markSessionMfaVerified(session);
+  log.info(`MFA verified for "${sanitizeForLog(session.username)}" from ${ip}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+async function handleChangePassword(req, res, session) {
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  const current = String(body.currentPassword || '');
+  const next = String(body.newPassword || '');
+
+  const secrets = security.readSecrets();
+  if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
+  if (!security.verifyPassword(current, secrets.password)) {
+    release('security');
+    return sendJson(res, 401, { error: 'Current password is incorrect.' });
+  }
+  if (next.length < 8) {
+    release('security');
+    return sendJson(res, 400, { error: 'New password must be at least 8 characters.' });
+  }
+
+  secrets.password = security.hashPassword(next);
+  security.writeSecrets(secrets);
+
+  // An attacker holding a stolen session cookie should not survive a
+  // password change — drop every OTHER session, keep the caller's own.
+  for (const token of [...sessions.keys()]) {
+    if (token !== session.token) sessions.delete(token);
+  }
+
+  release('security');
+  log.info(`Password changed by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+async function handleMfaSetup(req, res, session) {
+  if (!acquire(res, 'security')) return;
+  const secrets = security.readSecrets();
+  if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
+
+  const pendingSecret = security.generateTotpSecret();
+  secrets.mfa.pendingSecret = pendingSecret;
+  security.writeSecrets(secrets);
+
+  release('security');
+  return sendJson(res, 200, {
+    ok: true,
+    secret: pendingSecret,
+    otpauthUrl: security.otpauthUrl(secrets.username, pendingSecret),
+  });
+}
+
+async function handleMfaConfirm(req, res, session) {
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+
+  const secrets = security.readSecrets();
+  if (!secrets || !secrets.mfa.pendingSecret) {
+    release('security');
+    return sendJson(res, 400, { error: 'No MFA setup in progress — start from "Enable MFA" again.' });
+  }
+  if (!security.verifyTotp(secrets.mfa.pendingSecret, String(body.code || ''))) {
+    release('security');
+    return sendJson(res, 401, { error: 'Invalid code.' });
+  }
+
+  secrets.mfa.secret = secrets.mfa.pendingSecret;
+  secrets.mfa.pendingSecret = null;
+  secrets.mfa.enabled = true;
+  secrets.mfa.confirmedAt = Date.now();
+  const backupCodes = security.generateBackupCodes(8);
+  secrets.backupCodes = backupCodes.map((c) => security.hashBackupCode(c));
+  security.writeSecrets(secrets);
+
+  release('security');
+  log.info(`MFA enabled by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  // Plaintext codes are returned exactly once, here, and never stored or
+  // logged — only their hashes persist.
+  return sendJson(res, 200, { ok: true, backupCodes });
+}
+
+async function handleMfaDisable(req, res, session) {
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+
+  const secrets = security.readSecrets();
+  if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
+  if (!security.verifyPassword(String(body.currentPassword || ''), secrets.password)) {
+    release('security');
+    return sendJson(res, 401, { error: 'Current password is incorrect.' });
+  }
+
+  // Defense in depth against a stolen session cookie alone disabling MFA:
+  // still requires a live TOTP code or an unused backup code, same as any
+  // other MFA check.
+  let factorOk = false;
+  if (body.backupCode) factorOk = security.verifyAndConsumeBackupCode(secrets, String(body.backupCode));
+  else if (body.code) factorOk = security.verifyTotp(secrets.mfa.secret, String(body.code));
+  if (!factorOk) {
+    release('security');
+    return sendJson(res, 401, { error: 'Invalid code.' });
+  }
+
+  secrets.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
+  secrets.backupCodes = [];
+  security.writeSecrets(secrets);
+
+  release('security');
+  log.warn(`MFA disabled by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+async function handleMfaRegenerateBackupCodes(req, res, session) {
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+
+  const secrets = security.readSecrets();
+  if (!secrets || !secrets.mfa.enabled) {
+    release('security');
+    return sendJson(res, 400, { error: 'MFA is not enabled on this account.' });
+  }
+  if (!security.verifyPassword(String(body.currentPassword || ''), secrets.password)) {
+    release('security');
+    return sendJson(res, 401, { error: 'Current password is incorrect.' });
+  }
+
+  const backupCodes = security.generateBackupCodes(8);
+  secrets.backupCodes = backupCodes.map((c) => security.hashBackupCode(c));
+  security.writeSecrets(secrets);
+
+  release('security');
+  log.info(`Backup codes regenerated by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true, backupCodes });
+}
+
+// Appends `line` to the file at `absPath` if it is not already present as an
+// exact line, chmod 600 like every other list-file write in this module.
+// Shared by handleWhitelistMe so it doesn't duplicate doSave's file-write
+// steps for a one-line append.
+function appendUniqueLine(absPath, line) {
+  let content = '';
+  try { content = fs.readFileSync(absPath, 'utf8'); } catch (_) { /* file may not exist yet */ }
+  const existing = content.split(/\r?\n/).map((l) => l.trim());
+  if (existing.includes(line)) return false;
+  const withTrailingNewline = content.length && !content.endsWith('\n') ? content + '\n' : content;
+  fs.writeFileSync(absPath, withTrailingNewline + line + '\n', { mode: SECRET_FILE_MODE });
+  chmodQuiet(absPath, SECRET_FILE_MODE);
+  return true;
+}
+
+async function handleWhitelistMe(req, res, session) {
+  if (!acquire(res, 'save')) return; // shares doSave's lock — both write whitelist.txt
+  const ip = session.ip;
+  const abs = path.resolve(config.whitelistPath || './whitelist.txt');
+  let added;
+  try {
+    added = appendUniqueLine(abs, ip);
+  } catch (err) {
+    release('save');
+    return sendJson(res, 500, { error: `Could not write whitelist.txt: ${err.message}` });
+  }
+
+  try {
+    const ipf = require('./ipfilter').getIPFilter();
+    if (ipf && ipf.reloadWhitelist) ipf.reloadWhitelist();
+  } catch (_) { /* ipfilter not ready — restart will pick it up */ }
+
+  release('save');
+  log.info(`"${sanitizeForLog(session.username)}" whitelisted their own IP ${ip} from Security Settings`);
+  return sendJson(res, 200, { ok: true, ip, added });
+}
+
+// ---------------------------------------------------------------------------
+// Management API — key-authenticated lane that reuses the browser handlers.
+// Runs before the trusted-host gate: an API caller is gated by the key and its
+// own optional IP allowlist (api-trustedhosts.txt), independently of the
+// editor's fail-closed trustedhosts.txt. A browser never sends these headers,
+// so the login/session/CSRF path below is untouched.
+// ---------------------------------------------------------------------------
+
+// Pull the presented key from Authorization: Bearer <k> or X-API-Key: <k>.
+// Returns null when neither header is present (→ fall through to the browser
+// lane). Never read from the query string — it would land in logs/history.
+function extractApiKey(req) {
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string') {
+    const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  const x = req.headers['x-api-key'];
+  if (typeof x === 'string' && x.trim()) return x.trim();
+  return null;
+}
+
+async function handleApiRequest(req, res, ip, presentedKey) {
+  // Brute-force lockout (5 fails / 15 min per IP). Its own counter — a bad-key
+  // flood must not lock a human admin out of the browser login from the same IP.
+  if (apiLocked(ip)) {
+    return sendJson(res, 429, { error: 'Too many failed attempts. Try again later.' });
+  }
+
+  // Optional source-IP allowlist. Empty/missing list => any IP may call.
+  if (loadedApiHosts && loadedApiHosts.entries.length > 0 &&
+      !trustedhosts.isTrusted(ip, loadedApiHosts)) {
+    log.blocked(`API: rejected IP ${ip} (${req.method} ${req.url})`);
+    return sendJson(res, 403, { error: 'Forbidden' });
+  }
+
+  if (!config.api.key || !safeEqual(presentedKey, config.api.key)) {
+    recordApiFail(ip);
+    log.blocked(`API: bad key from ${ip} (${req.method} ${req.url})`);
+    return sendJson(res, 401, { error: 'Invalid API key' });
+  }
+  apiFails.delete(ip);
+
+  let pathname, query;
+  try {
+    const u = new URL(req.url, 'https://localhost');
+    pathname = decodeURIComponent(u.pathname);
+    query = u.searchParams;
+  } catch (_) {
+    pathname = req.url.split('?')[0];
+    query = new URLSearchParams();
+  }
+  const method = req.method;
+
+  if (!pathname.startsWith('/api/')) {
+    return sendJson(res, 404, { error: 'Not found' });
+  }
+
+  // Stand-in for a browser session: handlers only read .username (logging) and
+  // .csrf (buildConfigPayload — harmless when null). No CSRF check: this lane
+  // authenticates per-request with the key and carries no cookie.
+  const session = { username: 'api', csrf: null, ip, isApi: true };
+
+  if (pathname === '/api/config' && method === 'GET') {
+    return sendJson(res, 200, await buildConfigPayload(session));
+  }
+  if (pathname === '/api/health' && method === 'GET') {
+    return sendJson(res, 200, await buildHealth());
+  }
+  if (pathname === '/api/stats' && method === 'GET') {
+    return handleStats(res);
+  }
+  if (pathname === '/api/save' && method === 'POST') {
+    return handleSave(req, res, session);
+  }
+  if (pathname === '/api/restart' && method === 'POST') {
+    return handleRestart(req, res, session);
+  }
+  if (pathname === '/api/geoip' && method === 'POST') {
+    return handleGeoip(req, res, session);
+  }
+  if (pathname === '/api/sshkey' && method === 'POST') {
+    return handleSshKey(req, res, session);
+  }
+  if (pathname === '/api/cert' && method === 'POST') {
+    return handleCert(req, res, session);
+  }
+  if (pathname === '/api/logs' && method === 'GET') {
+    return handleLogsList(res);
+  }
+  if (pathname === '/api/logs/view' && method === 'GET') {
+    return handleLogsView(res, query);
+  }
+  if (pathname === '/api/logs/delete' && method === 'POST') {
+    return handleLogsDelete(req, res, session);
+  }
+  return sendJson(res, 404, { error: 'Not found' });
+}
+
+// ---------------------------------------------------------------------------
 // main request handler
 // ---------------------------------------------------------------------------
 let loadedTrustedHosts = null;
+let loadedApiHosts = null;
 
 async function onRequest(req, res) {
   const ip = clientIp(req);
@@ -1437,6 +2019,14 @@ async function onRequest(req, res) {
       'breaks it. Bind CONFIG_EDITOR_BIND to a private interface or remove the proxy.');
   }
 
+  // Management API lane: a request carrying an API key is handled here, gated by
+  // the key + api-trustedhosts.txt only — not the browser trusted-host gate
+  // below. If the API is disabled, fall through (the browser gate then applies).
+  const apiKey = extractApiKey(req);
+  if (apiKey !== null && config.api.enabled) {
+    return handleApiRequest(req, res, ip, apiKey);
+  }
+
   // Gate 1: trusted-host allowlist. Empty/missing list => nobody gets in.
   if (!trustedhosts.isTrusted(ip, loadedTrustedHosts)) {
     log.blocked(`Config editor: rejected untrusted host ${ip} (${req.method} ${req.url})`);
@@ -1445,16 +2035,22 @@ async function onRequest(req, res) {
     return;
   }
 
-  let pathname;
+  let pathname, query;
   try {
-    pathname = decodeURIComponent(new URL(req.url, 'https://localhost').pathname);
+    const u = new URL(req.url, 'https://localhost');
+    pathname = decodeURIComponent(u.pathname);
+    query = u.searchParams;
   } catch (_) {
     pathname = req.url.split('?')[0];
+    query = new URLSearchParams();
   }
   const method = req.method;
 
   try {
     // --- unauthenticated routes ---
+    if (method === 'GET' && STATIC_ASSETS[pathname]) {
+      return serveStaticAsset(res, pathname);
+    }
     if (pathname === '/login' && method === 'GET') {
       if (getSession(req)) return redirect(res, '/');
       return sendPage(res, 200, (n) => views.loginPage({ nonce: n }));
@@ -1489,11 +2085,31 @@ async function onRequest(req, res) {
       return;
     }
 
+    // MFA gate: a session that hasn't verified its second factor yet (only
+    // possible when the account has MFA enabled — see createSession) may
+    // only reach the verify endpoint, to complete login, and the app root,
+    // to be served the MFA challenge page. Everything else — including
+    // /api/config — 401s until it passes. /logout above is unaffected by
+    // this gate on purpose, so a stuck MFA prompt always has a way out.
+    if (!session.mfaVerified) {
+      if (pathname === '/api/security/mfa/verify-login' && method === 'POST') {
+        return handleMfaVerifyLogin(req, res, session, ip);
+      }
+      if (pathname === '/' && method === 'GET') {
+        return sendPage(res, 200, (n) => views.mfaPage({ csrf: session.csrf, nonce: n }));
+      }
+      if (wantsJson) return sendJson(res, 401, { error: 'MFA verification required' });
+      return redirect(res, '/');
+    }
+
     if (pathname === '/' && method === 'GET') {
       return sendPage(res, 200, (n) => views.appPage({ csrf: session.csrf, username: session.username, nonce: n }));
     }
     if (pathname === '/api/config' && method === 'GET') {
-      return sendJson(res, 200, buildConfigPayload(session));
+      return sendJson(res, 200, await buildConfigPayload(session));
+    }
+    if (pathname === '/api/health' && method === 'GET') {
+      return sendJson(res, 200, await buildHealth());
     }
     if (pathname === '/api/stats' && method === 'GET') {
       return handleStats(res);
@@ -1507,11 +2123,38 @@ async function onRequest(req, res) {
     if (pathname === '/api/geoip' && method === 'POST') {
       return handleGeoip(req, res, session);
     }
+    if (pathname === '/api/security/change-password' && method === 'POST') {
+      return handleChangePassword(req, res, session);
+    }
+    if (pathname === '/api/security/mfa/setup' && method === 'POST') {
+      return handleMfaSetup(req, res, session);
+    }
+    if (pathname === '/api/security/mfa/confirm' && method === 'POST') {
+      return handleMfaConfirm(req, res, session);
+    }
+    if (pathname === '/api/security/mfa/disable' && method === 'POST') {
+      return handleMfaDisable(req, res, session);
+    }
+    if (pathname === '/api/security/mfa/regenerate-backup-codes' && method === 'POST') {
+      return handleMfaRegenerateBackupCodes(req, res, session);
+    }
+    if (pathname === '/api/security/whitelist-me' && method === 'POST') {
+      return handleWhitelistMe(req, res, session);
+    }
     if (pathname === '/api/sshkey' && method === 'POST') {
       return handleSshKey(req, res, session);
     }
     if (pathname === '/api/cert' && method === 'POST') {
       return handleCert(req, res, session);
+    }
+    if (pathname === '/api/logs' && method === 'GET') {
+      return handleLogsList(res);
+    }
+    if (pathname === '/api/logs/view' && method === 'GET') {
+      return handleLogsView(res, query);
+    }
+    if (pathname === '/api/logs/delete' && method === 'POST') {
+      return handleLogsDelete(req, res, session);
     }
 
     res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -1550,10 +2193,27 @@ function startConfigEditorServer() {
     log.info(`Config editor: ${loadedTrustedHosts.entries.length} trusted host entr(y/ies) loaded`);
   }
 
+  loadedApiHosts = trustedhosts.loadTrustedHosts(config.api.trustedHostsPath);
+  if (loadedApiHosts.invalid.length) {
+    log.warn(`Management API: ${loadedApiHosts.invalid.length} unparseable api-trustedhosts line(s) ignored`);
+  }
+  if (config.api.enabled) {
+    log.info(`Management API: enabled on /api/* — ${loadedApiHosts.entries.length
+      ? `${loadedApiHosts.entries.length} allowed IP entr(y/ies)`
+      : 'no source-IP restriction'}`);
+  } else {
+    log.info('Management API is disabled');
+  }
+
   const restored = loadPersistedSessions();
   if (restored) {
     log.info(`Config editor: ${restored} admin session(s) carried over the restart`);
   }
+
+  // Warm the forever-caches now so the first /api/config or /api/restart
+  // request doesn't pay for the pm2/certbot presence check.
+  hasPm2().catch(() => {});
+  hasCertbot().catch(() => {});
 
   let tlsKey, tlsCert;
   try {
@@ -1589,11 +2249,7 @@ function startConfigEditorServer() {
   server.keepAliveTimeout = 10000;
 
   server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      log.error(`Config editor: port ${ce.port} is already in use`);
-    } else {
-      log.error(`Config editor server error: ${err.message}`);
-    }
+    log.error(`Config editor server error: ${err.message}`);
   });
 
   // Reject any non-HTTP/garbage on the socket quietly (e.g. a port scanner).
@@ -1601,21 +2257,91 @@ function startConfigEditorServer() {
     try { socket.destroy(); } catch (_) {}
   });
 
-  server.listen(ce.port, ce.bindAddress, () => {
-    log.info(`Config editor listening on https://${ce.bindAddress}:${ce.port}`);
+  // The https.Server does not listen directly. muxServer owns the port: it peeks
+  // the first byte and hands TLS connections (0x16 = handshake record) to the
+  // https server untouched, while a plain-HTTP request gets a 301 to https://.
+  // Uses 'readable' + read() (paused mode) so no bytes are lost across the
+  // emit('connection') handoff — 'data' would put the socket in flowing mode.
+  muxServer = net.createServer((socket) => {
+    socket.setTimeout(15000, () => socket.destroy());
+    socket.once('error', () => { try { socket.destroy(); } catch (_) {} });
+    const onReadable = () => {
+      const chunk = socket.read();
+      if (!chunk || chunk.length === 0) { socket.once('readable', onReadable); return; }
+      if (chunk[0] === 0x16) {
+        socket.unshift(chunk);
+        socket.setTimeout(0);          // hand off; the https server manages timeouts
+        server.emit('connection', socket);
+      } else if (ce.httpRedirectEnabled) {
+        respondPlainRedirect(socket, chunk, ce);
+      } else {
+        socket.destroy();              // pre-fix behaviour: drop non-TLS
+      }
+    };
+    socket.once('readable', onReadable);
+  });
+
+  muxServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      log.error(`Config editor: port ${ce.port} is already in use`);
+    } else {
+      log.error(`Config editor listener error: ${err.message}`);
+    }
+  });
+
+  muxServer.listen(ce.port, ce.bindAddress, () => {
+    log.info(`Config editor listening on https://${ce.bindAddress}:${ce.port}` +
+      (ce.httpRedirectEnabled ? ' (plain HTTP on this port 301s to HTTPS)' : ''));
   });
 
   sweepTimer = setInterval(sweepSessions, 60000);
   if (sweepTimer.unref) sweepTimer.unref();
 }
 
+// Answer a plaintext HTTP request that landed on the TLS port with a raw 301 to
+// the https:// URL, then close. Host: prefer CONFIG_EDITOR_CERT_DOMAIN (its cert
+// is valid for that name); else the request's Host header; else the bind address.
+function respondPlainRedirect(socket, firstChunk, ce) {
+  try {
+    const head = firstChunk.toString('latin1', 0, Math.min(firstChunk.length, 8192));
+    const reqLine = head.split('\r\n', 1)[0] || '';
+    const m = /^[A-Z]+\s+(\S+)\s+HTTP\/1\.[01]$/i.exec(reqLine);
+    let target = (m && m[1]) || '/';
+    if (!target.startsWith('/') || target.length > 2000) target = '/';   // ignore absolute/CONNECT forms
+
+    let host = (envFileValue('CONFIG_EDITOR_CERT_DOMAIN') || ce.certDomain || '').trim();
+    if (!host) {
+      const hh = (head.match(/\r\nHost:[ \t]*([^\r\n]+)/i) || [])[1] || '';
+      host = hh.replace(/:\d+$/, '').trim();
+    }
+    if (!host) host = (ce.bindAddress && ce.bindAddress !== '0.0.0.0' && ce.bindAddress !== '::')
+      ? ce.bindAddress : 'localhost';
+
+    const portPart = ce.port === 443 ? '' : ':' + ce.port;
+    const location = `https://${host}${portPart}${target}`;
+    socket.end(
+      'HTTP/1.1 301 Moved Permanently\r\n' +
+      `Location: ${location}\r\n` +
+      'Cache-Control: no-store\r\n' +
+      'Content-Length: 0\r\n' +
+      'Connection: close\r\n\r\n'
+    );
+  } catch (_) {
+    try { socket.destroy(); } catch (_) {}
+  }
+}
+
 function stopConfigEditorServer() {
   return new Promise((resolve) => {
     if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
     sessions.clear();
-    if (!server) return resolve();
-    server.close(() => { log.info('Config editor server closed'); resolve(); });
-    server = null;
+    server = null; // https.Server never listened on a port; nothing to close
+    if (muxServer) {
+      muxServer.close(() => { log.info('Config editor server closed'); resolve(); });
+      muxServer = null;
+    } else {
+      resolve();
+    }
   });
 }
 

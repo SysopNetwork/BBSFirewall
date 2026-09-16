@@ -138,4 +138,139 @@ function closeAll() {
   streams.clear();
 }
 
-module.exports = { write, closeAll, LEVELS };
+// Matches exactly the names getStream() creates: "<proxy>-<YYYY-MM-DD>.log",
+// with the proxy folder name repeated in the filename.
+const LOG_FILENAME_RE = /^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.log$/;
+
+function logsRoot() {
+  return path.resolve(config.fileLog.dir || './logs');
+}
+
+/**
+ * List every rotated log file on disk, across all proxy subfolders, newest
+ * first within each proxy. Used by the config editor / management API — not
+ * on any request-handling hot path.
+ */
+function listLogFiles() {
+  const root = logsRoot();
+  let proxyDirs;
+  try {
+    proxyDirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory());
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const out = [];
+  for (const d of proxyDirs) {
+    const proxyName = d.name;
+    let names;
+    try { names = fs.readdirSync(path.join(root, proxyName)); } catch (_) { continue; }
+    for (const name of names) {
+      const m = LOG_FILENAME_RE.exec(name);
+      if (!m || m[1] !== proxyName) continue; // ignore anything not shaped like our own output
+      let stat;
+      try { stat = fs.statSync(path.join(root, proxyName, name)); } catch (_) { continue; }
+      if (!stat.isFile()) continue;
+      out.push({ proxy: proxyName, file: name, date: m[2], size: stat.size, mtime: stat.mtime.toISOString() });
+    }
+  }
+  out.sort((a, b) => (a.proxy === b.proxy ? b.date.localeCompare(a.date) : a.proxy.localeCompare(b.proxy)));
+  return out;
+}
+
+// Resolve a (proxy, file) pair to an absolute path, refusing anything that
+// isn't an exact, well-formed log filename under its matching proxy folder —
+// the filename's own proxy prefix must equal the requested proxy, and both
+// are restricted to LOG_FILENAME_RE's [a-z0-9-] charset, so this can never
+// escape logsRoot() regardless of what a caller passes in.
+function resolveLogFile(proxyName, fileName) {
+  if (typeof proxyName !== 'string' || typeof fileName !== 'string') {
+    throw new Error('proxy and file are required');
+  }
+  const m = LOG_FILENAME_RE.exec(fileName);
+  if (!m || m[1] !== proxyName) {
+    throw new Error('invalid log file name');
+  }
+  return path.join(logsRoot(), proxyName, fileName);
+}
+
+/**
+ * Read a log file's content for display. Files at or under maxBytes are
+ * returned whole; larger ones are tailed to the last maxBytes (rounded down
+ * to a full line) so viewing a multi-day debug-level file can't blow up
+ * memory or the response.
+ */
+function readLogFile(proxyName, fileName, opts = {}) {
+  const full = resolveLogFile(proxyName, fileName);
+  const stat = fs.statSync(full); // throws ENOENT (caller maps to 404) if missing
+  const maxBytes = opts.maxBytes || 512 * 1024;
+  if (stat.size <= maxBytes) {
+    return { content: fs.readFileSync(full, 'utf8'), truncated: false, size: stat.size };
+  }
+  const fd = fs.openSync(full, 'r');
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    fs.readSync(fd, buf, 0, maxBytes, stat.size - maxBytes);
+    let text = buf.toString('utf8');
+    const nl = text.indexOf('\n');
+    if (nl !== -1) text = text.slice(nl + 1); // drop the partial first line
+    return { content: text, truncated: true, size: stat.size };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Delete a rotated log file. If it's the proxy's currently-open file, close
+ * the write stream first — an open write handle can otherwise keep the file
+ * alive under the caller (and blocks the unlink outright on Windows); the
+ * next write for that proxy just reopens a fresh file as usual.
+ */
+function deleteLogFile(proxyName, fileName) {
+  const full = resolveLogFile(proxyName, fileName);
+  const active = streams.get(proxyName);
+  if (active && full === path.join(logsRoot(), proxyName, `${proxyName}-${currentDate()}.log`)) {
+    active.stream.end();
+    streams.delete(proxyName);
+  }
+  fs.unlinkSync(full);
+}
+
+/**
+ * Delete every rotated log file older than config.fileLog.retentionDays.
+ * Reads the retention value fresh on each call (not cached at startup) so a
+ * value lowered from the config editor takes effect on the next tick without
+ * a restart. Reuses listLogFiles()/deleteLogFile() rather than a second
+ * enumeration/deletion path.
+ */
+function pruneOldLogs() {
+  const retentionDays = (config.fileLog && config.fileLog.retentionDays) || 30;
+  const cutoff = new Date(Date.now() - retentionDays * 86400000).toISOString().slice(0, 10);
+  let deleted = 0;
+  for (const f of listLogFiles()) {
+    if (f.date < cutoff) {
+      try {
+        deleteLogFile(f.proxy, f.file);
+        deleted += 1;
+      } catch (err) {
+        console.error(`[file-logger] prune failed for ${f.proxy}/${f.file}: ${err.message}`);
+      }
+    }
+  }
+  return deleted;
+}
+
+let pruneTimer = null;
+
+// Runs pruneOldLogs() once immediately (so a freshly-lowered retention value
+// doesn't wait a full interval) and then on a recurring timer. Independent of
+// the config editor — called once from server.js at startup so pruning runs
+// even with the editor disabled. unref'd so it never keeps the process alive.
+function startPruning(intervalMs) {
+  if (pruneTimer) clearInterval(pruneTimer);
+  pruneOldLogs();
+  pruneTimer = setInterval(pruneOldLogs, intervalMs);
+  if (pruneTimer.unref) pruneTimer.unref();
+}
+
+module.exports = { write, closeAll, LEVELS, listLogFiles, readLogFile, deleteLogFile, pruneOldLogs, startPruning };

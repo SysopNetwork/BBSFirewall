@@ -1,0 +1,26 @@
+# BBSFirewall - Management API IP allowlist
+#
+# Source IPs / CIDRs allowed to call the management API (the /api/* routes on
+# the config editor's HTTPS port). This is OPTIONAL and independent of
+# trustedhosts.txt: an API caller does NOT need to be a trusted editor host.
+#
+# One IP or CIDR per line. IPv4 and IPv6 both work. Lines starting with # are
+# comments; an inline # comment after an entry is also allowed.
+#
+# IMPORTANT: unlike trustedhosts.txt, an EMPTY or MISSING file here does NOT
+# lock anyone out — it means "any source IP may call the API". The API key
+# (API_KEY in .env) is always required regardless. Add entries only to narrow
+# access to known dashboard servers.
+#
+# Examples:
+#   203.0.113.10           the dashboard server
+#   198.51.100.0/24        a hosting range
+#   2001:db8:abcd::/48     an IPv6 range
+#
+# To use this file:
+# 1. Copy to api-trustedhosts.txt
+# 2. Add the IPs / ranges your dashboard calls the API from
+# 3. Set API_TRUSTEDHOSTS_PATH=./api-trustedhosts.txt in your .env (this is the default)
+
+# 203.0.113.10
+# 198.51.100.0/24
