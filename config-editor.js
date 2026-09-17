@@ -649,15 +649,23 @@ const recordMfaFail = (ip) => recordFail(mfaFails, ip, MFA_LOCK_MS);
 // ---------------------------------------------------------------------------
 
 let pm2Available = null;
+// Only a SUCCESSFUL detection is cached (permanently — pm2 isn't going to
+// vanish once found). A failure is never cached: the startup warm-up call
+// below is fire-and-forget, so a request landing in the first instant after
+// boot can race it and see pm2Available still null; spawning the pm2 CLI can
+// also just be transiently slow right after this process itself restarted
+// (small/busy box). Caching that as a permanent "not found" wedged the
+// Restart button with a false "pm2 was not found on this host" for the rest
+// of the process's life — observed for real, not just in theory.
 async function hasPm2() {
-  if (pm2Available !== null) return pm2Available;
+  if (pm2Available) return true;
   try {
     await execFileAsync('pm2', ['-v'], { timeout: 4000 });
     pm2Available = true;
+    return true;
   } catch (_) {
-    pm2Available = false;
+    return false;
   }
-  return pm2Available;
 }
 
 function humanUptime(sec) {
@@ -786,15 +794,16 @@ async function certInfoFresh(certPath) {
 }
 
 let certbotAvailable = null;
+// Same reasoning as hasPm2() above — only a successful detection sticks.
 async function hasCertbot() {
-  if (certbotAvailable !== null) return certbotAvailable;
+  if (certbotAvailable) return true;
   try {
     await execFileAsync('certbot', ['--version'], { timeout: 5000 });
     certbotAvailable = true;
+    return true;
   } catch (_) {
-    certbotAvailable = false;
+    return false;
   }
-  return certbotAvailable;
 }
 
 // Runs the shelled-out probes concurrently — each is a separate child process,
@@ -827,9 +836,10 @@ async function buildHealth() {
 // ---------------------------------------------------------------------------
 // /api/config — current values for the form
 // ---------------------------------------------------------------------------
-// Fast and synchronous except for hasPm2(), which is cached forever after its
-// first call (warmed at startup — see startConfigEditorServer) so this stays
-// non-blocking in practice. Health data (ssh-keygen/openssl/certbot probes)
+// Fast and synchronous except for hasPm2(), whose successful result is cached
+// (warmed at startup — see startConfigEditorServer) so this stays non-blocking
+// in practice; a not-yet-warmed or transiently-failed check just re-runs next
+// call rather than wedging the result. Health data (ssh-keygen/openssl/certbot probes)
 // lives behind the separate /api/health endpoint so a slow probe never delays
 // the Settings sections or the header version — see buildHealth().
 async function buildConfigPayload(session) {

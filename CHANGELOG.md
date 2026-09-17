@@ -3,6 +3,13 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
+## v1.3.7 — 2026-09-17
+
+### 🐛 Fixes
+
+- Fixed the "Restart" button incorrectly reporting "pm2 was not found on this host"
+  after certain restart sequences, even though pm2 was installed and working normally.
+
 ## v1.3.6 — 2026-09-17
 
 Security hardening and stability fixes for SSH filtering, MFA, and the config editor.

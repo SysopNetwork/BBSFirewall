@@ -18,7 +18,7 @@ By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/S
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?logo=linux&logoColor=white)]()
 [![PM2](https://img.shields.io/badge/PM2-ready-2B037A?logo=pm2&logoColor=white)](https://pm2.keymetrics.io/)
 
-📋 **[See what's new in v1.3.6 →](CHANGELOG.md)**
+📋 **[See what's new in v1.3.7 →](CHANGELOG.md)**
 
 </div>
 
