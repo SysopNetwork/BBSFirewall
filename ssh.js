@@ -13,10 +13,41 @@ const fs = require('fs');
 const logger = require('./logger');
 const metrics = require('./metrics');
 const { getIPFilter } = require('./ipfilter');
+const { getGeoIP } = require('./geoip');
 const { detectFromSSHEnvironment, detectFromTerminalType, getBackendPortForEncoding } = require('./encoding-detector');
 const { buildHeader: buildProxyHeader } = require('./proxy-protocol');
 
 const log = logger.getLogger('ssh');
+
+// Mirrors ProxyConnection.shouldBlockConnection in proxy.js — the telnet path's
+// GeoIP country block was never ported over here, which let a caller from a
+// blocked country simply connect via SSH_MODE=terminate instead of telnet to
+// bypass BLOCKED_COUNTRIES entirely.
+function shouldBlockByCountry(config, ipAddress) {
+  const geoip = getGeoIP();
+  if (!geoip || !geoip.isEnabled) return false;
+
+  const geoInfo = geoip.getCountryInfo(ipAddress);
+  if (!geoInfo || !geoInfo.countryCode) {
+    if (config.blockUnknownCountries) {
+      log.info(`Blocked unknown country for IP: ${ipAddress}`);
+      return true;
+    }
+    return false;
+  }
+
+  log.debug(`SSH connection from ${geoInfo.countryName} (${geoInfo.countryCode})`);
+
+  if (config.blockedCountries.length > 0) {
+    const isBlocked = config.blockedCountries.includes(geoInfo.countryCode.toUpperCase());
+    if (isBlocked) {
+      log.info(`Blocked ${geoInfo.countryName} (${geoInfo.countryCode})`);
+    }
+    return isBlocked;
+  }
+
+  return false;
+}
 
 function createSSHServer(config) {
   if (config.sshMode !== 'terminate') {
@@ -71,6 +102,13 @@ function createSSHServer(config) {
         // Check per-IP concurrent connection limit (whitelisted IPs are exempt)
         if (!accessCheck.whitelisted && ipFilter.isConnectionLimitExceeded(clientIP)) {
           log.blocked(`SSH connection rejected: per-IP limit reached for ${clientIP}`);
+          client.end();
+          return;
+        }
+
+        // Check country blocking (whitelisted IPs are exempt)
+        if (!accessCheck.whitelisted && shouldBlockByCountry(config, clientIP)) {
+          log.blocked(`SSH connection blocked by country filter: ${clientIP}`);
           client.end();
           return;
         }

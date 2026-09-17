@@ -172,22 +172,43 @@ function hotp(secretBase32, counter) {
   return (bin % (10 ** TOTP_DIGITS)).toString().padStart(TOTP_DIGITS, '0');
 }
 
-function totpAt(secretBase32, unixSeconds) {
-  return hotp(secretBase32, Math.floor(unixSeconds / TOTP_STEP_SECONDS));
-}
-
-function verifyTotp(secretBase32, code, window = TOTP_WINDOW) {
+// `field` is 'secret' (the confirmed, live MFA secret) or 'pendingSecret'
+// (mid-setup, before "Enable MFA" is confirmed) — secrets.mfa[field].
+//
+// Unlike backup codes (each hash marked usedAt and never matched again), a
+// bare TOTP check has no memory of what it already accepted: the same
+// correct code stays valid for the whole ~60-90s window (current step ± 1),
+// so it could be submitted more than once — e.g. by whatever briefly saw it
+// (a compromised authenticator app/extension, a shoulder-surfed phone
+// screen) racing a second, attacker-initiated verification. Track the last
+// time-step that verified successfully and refuse to accept that step (or
+// an earlier one) again, the same single-use guarantee backup codes already
+// have. Persisted immediately (writeSecrets), like verifyAndConsumeBackupCode.
+function verifyTotp(secrets, field, code, window = TOTP_WINDOW) {
+  const mfa = secrets && secrets.mfa;
+  const secretBase32 = mfa ? mfa[field] : null;
   const cleaned = String(code || '').replace(/\s+/g, '');
   if (!/^\d{6}$/.test(cleaned) || !secretBase32) return false;
+
   const now = Math.floor(Date.now() / 1000);
-  let ok = false;
+  const currentStep = Math.floor(now / TOTP_STEP_SECONDS);
+  const lastUsedStep = Number.isFinite(mfa.lastUsedStep) ? mfa.lastUsedStep : -1;
+
+  let matchedStep = null;
   // Check every step in the window unconditionally (no early return) so
-  // response time doesn't reveal which offset, if any, matched.
+  // response time doesn't reveal which offset, if any, matched — the
+  // replay check below is a cheap integer compare alongside the constant-
+  // time string compare, so it doesn't change that timing shape.
   for (let w = -window; w <= window; w++) {
-    const candidate = totpAt(secretBase32, now + w * TOTP_STEP_SECONDS);
-    if (timingSafeEqualStr(candidate, cleaned)) ok = true;
+    const step = currentStep + w;
+    const candidate = hotp(secretBase32, step);
+    if (timingSafeEqualStr(candidate, cleaned) && step > lastUsedStep) matchedStep = step;
   }
-  return ok;
+  if (matchedStep === null) return false;
+
+  mfa.lastUsedStep = matchedStep;
+  writeSecrets(secrets);
+  return true;
 }
 
 function otpauthUrl(username, secretBase32) {

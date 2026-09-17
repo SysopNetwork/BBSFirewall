@@ -6,39 +6,25 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const trustedhosts = require('./trustedhosts');
 
-function ipToInt(ip) {
-  const parts = String(ip).split('.');
-  if (parts.length !== 4) return null;
-  let value = 0;
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const n = Number(part);
-    if (n > 255) return null;
-    value = (value * 256) + n;
-  }
-  return value >>> 0;
-}
-
-// IPv4-only. Returns false (not a string-equality fallback) for anything that
-// does not parse, so a malformed line can't accidentally match.
+// IPv4 and IPv6, via trustedhosts.js's address parsing (BigInt-based, already
+// handles both families correctly). This used to be a hand-rolled IPv4-only
+// implementation: an IPv6 CIDR in blocklist.txt/whitelist.txt would load
+// "successfully" (no error, no warning) but could never actually match any
+// address, silently leaving the whole range unblocked/un-whitelisted despite
+// both list files' own documentation advertising IPv6 CIDR support. Returns
+// false (not a string-equality fallback) for anything that does not parse,
+// so a malformed line can't accidentally match everything.
 function ipMatchesCIDR(ip, cidr) {
   const slash = cidr.indexOf('/');
   if (slash === -1) return ip === cidr;
 
-  const range = cidr.slice(0, slash);
-  const bitsStr = cidr.slice(slash + 1);
-  if (!/^\d{1,2}$/.test(bitsStr)) return false;
-  const bits = Number(bitsStr);
-  if (bits > 32) return false;
-  if (bits === 0) return true; // /0 matches every address
-
-  const ipInt = ipToInt(ip);
-  const rangeInt = ipToInt(range);
-  if (ipInt === null || rangeInt === null) return false;
-
-  const mask = (0xFFFFFFFF << (32 - bits)) >>> 0;
-  return (ipInt & mask) === (rangeInt & mask);
+  const entry = trustedhosts.parseEntry(cidr);
+  if (!entry) return false;
+  const info = trustedhosts.classifyAddress(ip);
+  if (!info) return false;
+  return trustedhosts.entryMatches(info, entry);
 }
 
 // Expand \xNN, \r, \n, \t, \0, \\ escapes so plain trigger patterns can match
@@ -168,8 +154,15 @@ class IPFilter {
         if (!trimmed || trimmed.startsWith('#')) continue;
         const token = trimmed.split('#')[0].trim();
         if (!token) continue;
-        if (token.includes('/')) this.whitelistCidr.push(token);
-        else this.whitelist.add(token);
+        if (token.includes('/')) {
+          if (!trustedhosts.parseEntry(token)) {
+            logger.warn(`Whitelist: skipping unparseable CIDR entry "${token}" — it can never match`);
+            continue;
+          }
+          this.whitelistCidr.push(token);
+        } else {
+          this.whitelist.add(token);
+        }
         count++;
       }
 
@@ -197,8 +190,15 @@ class IPFilter {
         // A trailing "# reason timestamp" comment is written by autoBlockIP.
         const token = trimmed.split('#')[0].trim();
         if (!token) continue;
-        if (token.includes('/')) this.blocklistCidr.push(token);
-        else this.blocklist.add(token);
+        if (token.includes('/')) {
+          if (!trustedhosts.parseEntry(token)) {
+            logger.warn(`Blocklist: skipping unparseable CIDR entry "${token}" — it can never match`);
+            continue;
+          }
+          this.blocklistCidr.push(token);
+        } else {
+          this.blocklist.add(token);
+        }
         count++;
       }
 

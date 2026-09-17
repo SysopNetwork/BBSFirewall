@@ -3,6 +3,28 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
+## v1.3.6 — 2026-09-17
+
+Security hardening and stability fixes for SSH filtering, MFA, and the config editor.
+
+### 🔐 Security
+
+- SSH connections (`SSH_MODE=terminate`) now enforce country blocking consistently with
+  telnet connections.
+- IPv6 ranges in the whitelist and blocklist are now matched correctly.
+- Enabling MFA, disabling MFA, and regenerating backup codes now sign out any other
+  active admin sessions, matching existing password-change behavior.
+- Authenticator codes can no longer be reused once accepted.
+
+### 🐛 Fixes
+
+- Fixed a config editor restart issue where, with "stay signed in" left unchecked, the
+  previous session could briefly appear active before redirecting to the login page.
+
+### ⬆️ Upgrading
+
+- No action required — all changes apply automatically on update.
+
 ## v1.3.5 — 2026-09-16
 
 A major update to the web config editor, focused on admin security and day-to-day
