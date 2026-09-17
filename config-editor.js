@@ -2334,7 +2334,14 @@ function respondPlainRedirect(socket, firstChunk, ce) {
 function stopConfigEditorServer() {
   return new Promise((resolve) => {
     if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
-    sessions.clear();
+    // Deliberately NOT sessions.clear() here: muxServer.close() only stops
+    // NEW connections — an already-open keep-alive socket (e.g. a browser
+    // tab's fetch) keeps being served by this still-alive process until it
+    // finishes draining, which can take several seconds. Wiping the map
+    // immediately made every request on such a socket 401 for that whole
+    // window, which is exactly the request /api/restart's keepSession carry-
+    // over (persistSessions/loadPersistedSessions, above) exists to avoid.
+    // The Map disappears on its own once the process actually exits.
     server = null; // https.Server never listened on a port; nothing to close
     if (muxServer) {
       muxServer.close(() => { log.info('Config editor server closed'); resolve(); });
