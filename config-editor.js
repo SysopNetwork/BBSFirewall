@@ -66,6 +66,7 @@ const SECRET_FILE_MODE = 0o600;
 const STATIC_ASSETS = {
   '/favicon.ico': { file: path.join(__dirname, 'assets', 'favicon.ico'), type: 'image/x-icon' },
   '/assets/logo.svg': { file: path.join(__dirname, 'assets', 'logo-dark.svg'), type: 'image/svg+xml' },
+  '/assets/logo-light.svg': { file: path.join(__dirname, 'assets', 'logo-light.svg'), type: 'image/svg+xml' },
 };
 
 let server = null;      // the https.Server (services connections handed to it by muxServer)
@@ -215,6 +216,9 @@ const ENV_SCHEMA = [
         help: 'Log an idle admin out after this long. 1800000 = 30 minutes. Minimum 60000.' },
       { key: 'CONFIG_EDITOR_HTTP_REDIRECT_ENABLED', type: 'bool', label: 'Redirect plain HTTP to HTTPS', def: 'true',
         help: 'On by default. When a browser hits this editor’s port with plain http:// (no TLS), answer with a 301 to the https:// URL instead of failing the handshake (ERR_EMPTY_RESPONSE). Same port — no extra listener. Set false to just drop such requests.' },
+      { key: 'REBOOT_ENABLED', type: 'bool', label: 'Allow full server reboot', def: 'false',
+        help: 'Off by default. Adds a "Reboot server" button to the Tools tab for Global Admin accounts — a full OS reboot, not just an app restart.',
+        helpLong: 'Meaningfully higher risk than the always-available "Restart firewall" button: that one restarts the BBSFirewall process (always SSH-recoverable in seconds); this one reboots the whole host, which is unreachable for several minutes and, if the box does not actually come back on its own, can need your hosting provider\'s own console to recover. Turning this on does not remove the other safety rails — it is only reachable by a Global Admin account, requires typing "REBOOT" to confirm, and is still refused at request time unless BBSFirewall can confirm pm2 has a working boot-time service on this host. Leave this off unless you specifically want that recovery option available.' },
     ]},
   { name: 'Management API', icon: 'key',
     help: 'Key-authenticated REST access to everything on this page (config, list files, restart, tools, stats) for a remote dashboard. Rides on this editor’s HTTPS port under /api/*, so the editor must be enabled. Authenticated by the bearer key below; optionally restricted by source IP in the API Trusted Hosts section below. This is a separate lane — an API caller does NOT need to be in trustedhosts.txt.',
@@ -696,6 +700,60 @@ async function hasPm2() {
   }
 }
 
+// Used to gate /api/reboot: a full OS reboot is only safe to offer when pm2
+// will actually bring BBSFirewall back up on its own. Three independent
+// signals, each checked separately rather than collapsed into one boolean, so
+// the UI can tell an admin WHICH part is missing instead of just "no":
+//   1. enabled — `pm2 startup` installed a systemd unit (pm2-<user>) and it's
+//      enabled to start at boot. A unit can exist but not be enabled, or
+//      belong to a different user than the one pm2 runs as now.
+//   2. active  — that unit is running right now, not just enabled-but-dead.
+//   3. appSaved — this app is actually IN pm2's saved process list
+//      (~/.pm2/dump.pm2, or $PM2_HOME/dump.pm2), which is what the boot unit
+//      actually resurrects. enabled+active with the app missing from the dump
+//      (e.g. `pm2 start` without a later `pm2 save`) would still come back up
+//      as an empty pm2 with nothing running — the single most likely way this
+//      whole check gives a false "safe."
+// `ok` (enabled && active) is the HARD gate used to block the reboot — a
+// reliable systemd-level signal. `appSaved` is best-effort/advisory only: it
+// depends on locating and parsing pm2's dump file correctly, which is a
+// weaker assumption (different PM2_HOME, unreadable file, format drift), so a
+// null/false appSaved surfaces as a warning in the UI rather than also
+// blocking the request — "do our best to check pm2," not "assume the worst
+// when one advisory probe can't read a file." Not cached like hasPm2()/
+// hasCertbot() — this can legitimately flip mid-session (an admin fixing it
+// after a first blocked attempt), and it only ever runs right before a
+// reboot, never on a hot path.
+async function pm2StartupStatus() {
+  const appName = config.configEditor.pm2AppName || 'bbsfirewall';
+  const status = { unit: null, enabled: false, active: false, appSaved: null, appName };
+
+  try {
+    const { stdout } = await execFileAsync(
+      'systemctl', ['list-unit-files', '--type=service', '--no-legend'], { timeout: 4000 },
+    );
+    const m = stdout.match(/^(pm2-\S+\.service)\s+enabled/m);
+    if (m) { status.unit = m[1]; status.enabled = true; }
+  } catch (_) { /* systemctl unavailable/failed — leave enabled:false */ }
+
+  if (status.unit) {
+    try {
+      const { stdout } = await execFileAsync('systemctl', ['is-active', status.unit], { timeout: 4000 });
+      status.active = stdout.trim() === 'active';
+    } catch (_) { /* is-active exits non-zero for inactive states — leave active:false */ }
+  }
+
+  try {
+    const dumpPath = path.join(process.env.PM2_HOME || path.join(os.homedir(), '.pm2'), 'dump.pm2');
+    const dump = JSON.parse(fs.readFileSync(dumpPath, 'utf-8'));
+    status.appSaved = Array.isArray(dump)
+      && dump.some((p) => (p && (p.name || (p.pm2_env && p.pm2_env.name))) === appName);
+  } catch (_) { status.appSaved = null; /* couldn't check — unknown, not necessarily bad */ }
+
+  status.ok = status.enabled && status.active;
+  return status;
+}
+
 function humanUptime(sec) {
   sec = Math.floor(sec);
   const d = Math.floor(sec / 86400); sec -= d * 86400;
@@ -842,11 +900,13 @@ async function hasCertbot() {
 // any one of them ran).
 async function buildHealth() {
   const ce = config.configEditor;
-  const [sshHostKey, editorCert, redirectCert, certbotInstalled] = await Promise.all([
+  const rebootEnabled = !!config.configEditor.rebootEnabled;
+  const [sshHostKey, editorCert, redirectCert, certbotInstalled, pm2Startup] = await Promise.all([
     sshHostKeyStatus(),
     certInfo(envFileValue('CONFIG_EDITOR_CERT_PATH') || ce.certPath),
     certInfo(envFileValue('HTTPS_CERT_PATH') || config.httpsCertPath),
     hasCertbot(),
+    rebootEnabled && process.platform === 'linux' ? pm2StartupStatus() : Promise.resolve(null),
   ]);
   return {
     geoip: geoipStatus(),
@@ -858,6 +918,9 @@ async function buildHealth() {
       redirect: envFileValue('HTTPS_CERT_DOMAIN') || '',
     },
     sshMode: envFileValue('SSH_MODE') || config.sshMode || 'off',
+    platform: process.platform,
+    rebootEnabled,
+    pm2Startup,
   };
 }
 
@@ -1286,6 +1349,93 @@ async function handleRestart(req, res, session) {
       if (err) {
         log.error(`pm2 restart failed: ${err.message}`);
         release('restart'); // let the admin try again; we did not actually restart
+      }
+    });
+  }, 750);
+}
+
+// ---------------------------------------------------------------------------
+// /api/reboot — Global Admin only, full OS-level reboot (v1.4,
+// [[roadmap-hosted-platform]] item 5). Meaningfully higher blast radius than
+// /api/restart above: that one restarts the pm2 process, which is always
+// SSH-recoverable within seconds; this one reboots the whole host, which is
+// unreachable for minutes and — if pm2 doesn't actually resurrect
+// BBSFirewall on boot — can need the hosting provider's own console to
+// recover. A provider-role recovery tool for unsticking a box that an app
+// restart hasn't fixed, not a customer-facing button: gated to
+// requireMasterAdmin, OFF by default behind its own REBOOT_ENABLED opt-in
+// (config.configEditor.rebootEnabled — same "opt-in feature flag" shape as
+// API_ENABLED/SSH_ENABLED/TRIGGER_BLOCK_ENABLED elsewhere in this file),
+// requires the caller to type the literal string "REBOOT" (checked
+// server-side, not just a disabled button client-side), refuses on a
+// non-Linux host, and hard-blocks (no override) unless pm2StartupStatus().ok
+// confirms an enabled AND active pm2 boot service — the whole point of the
+// check being that a reboot with no working boot service silently turns
+// "unstick the box" into "take it down permanently until someone reaches it
+// another way." Browser session lane only (not on the Management API) — same
+// reasoning as /api/security/*: this wants an interactive typed confirmation
+// in front of it, not something a leaked API key can fire with no friction.
+// ---------------------------------------------------------------------------
+async function handleRebootServer(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  if (!acquire(res, 'reboot')) return;
+
+  if (!config.configEditor.rebootEnabled) {
+    release('reboot');
+    return sendJson(res, 403, {
+      error: 'Server reboot is disabled. Enable "Allow full server reboot" in Settings > Config ' +
+        'Editor and restart BBSFirewall to turn it on.',
+    });
+  }
+
+  if (process.platform !== 'linux') {
+    release('reboot');
+    return sendJson(res, 400, {
+      error: `Server reboot is only supported on Linux hosts (this host reports "${process.platform}").`,
+    });
+  }
+
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  if (String(body.confirm || '') !== 'REBOOT') {
+    release('reboot');
+    return sendJson(res, 400, { error: 'Type REBOOT to confirm.' });
+  }
+
+  const pm2Startup = await pm2StartupStatus();
+  if (!pm2Startup.ok) {
+    release('reboot');
+    return sendJson(res, 400, {
+      error: 'No enabled, running pm2 boot service was found on this host (pm2 startup). Rebooting ' +
+        'now would not reliably bring BBSFirewall back up. Run "pm2 startup" (follow its printed ' +
+        'command) and "pm2 save" on the host, then try again.',
+      pm2Startup,
+    });
+  }
+  // Lock stays held deliberately: the host is about to go down, which clears
+  // it anyway, same reasoning as handleRestart above.
+
+  if (pm2Startup.appSaved === false || pm2Startup.appSaved === null) {
+    log.warn(`Reboot proceeding for "${sanitizeForLog(session.username)}" but pm2's saved process ` +
+      `list does not confirm "${pm2Startup.appName}" will be resurrected (appSaved=${pm2Startup.appSaved}) ` +
+      '— consider running "pm2 save" on the host.');
+  }
+  log.warn(`FULL SERVER REBOOT requested by "${sanitizeForLog(session.username)}" ` +
+    `(role ${session.role}) from ${clientIp(req)} — pm2Startup=${JSON.stringify(pm2Startup)} ` +
+    '— executing "shutdown -r now" in 750ms');
+  sendJson(res, 200, {
+    ok: true,
+    rebooting: true,
+    message: 'Rebooting the server now. The whole host will be unreachable for a few minutes — ' +
+      'there is no way to confirm success from here, so check back shortly.',
+  });
+
+  // Fire after the response has flushed, same pattern as handleRestart.
+  setTimeout(() => {
+    execFile('shutdown', ['-r', 'now'], { timeout: 10000 }, (err) => {
+      if (err) {
+        log.error(`Server reboot command failed: ${err.message}`);
+        release('reboot'); // let the admin try again; the host did not actually reboot
       }
     });
   }, 750);
@@ -1822,7 +1972,10 @@ async function handleLogsDelete(req, res, session) {
     const proxy = payload && payload.proxy;
     const file = payload && payload.file;
     require('./file-logger').deleteLogFile(proxy, file);
-    log.info(`Log file deleted by "${sanitizeForLog(session.username)}" from ${clientIp(req)}: ${proxy}/${file}`);
+    // warn, not info: deleting a log file destroys evidence of past activity,
+    // so it should be captured under the default file-log verbosity same as
+    // the other account/credential-lifecycle events, not require raising it.
+    log.warn(`Log file deleted by "${sanitizeForLog(session.username)}" from ${clientIp(req)}: ${proxy}/${file}`);
     return sendJson(res, 200, { ok: true, proxy, file });
   } catch (err) {
     if (err.code === 'ENOENT') return sendJson(res, 404, { error: 'Log file not found' });
@@ -1962,7 +2115,11 @@ async function handleChangePassword(req, res, session) {
   revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
-  log.info(`Password changed by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  // warn, not info: a credential change should be captured under the default
+  // file-log verbosity ('connections' tier), not require raising it to
+  // 'info' — same reasoning as the other account/credential-lifecycle events
+  // below (MFA enable, account create, backup-code regen).
+  log.warn(`Password changed by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true });
 }
 
@@ -2023,7 +2180,7 @@ async function handleMfaConfirm(req, res, session) {
   revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
-  log.info(`MFA enabled by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  log.warn(`MFA enabled by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   // Plaintext codes are returned exactly once, here, and never stored or
   // logged — only their hashes persist.
   return sendJson(res, 200, { ok: true, backupCodes });
@@ -2088,20 +2245,20 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
   revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
-  log.info(`Backup codes regenerated by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  log.warn(`Backup codes regenerated by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true, backupCodes });
 }
 
 // ---------------------------------------------------------------------------
 // /api/security/accounts* — master_admin-only admin-account management
 // (v1.4, [[roadmap-hosted-platform]] item 4). A 'firewall_admin' account
-// manages only its OWN password/MFA above; only 'master_admin' ("Provider /
-// Master Admin" in the UI) can see, add, or remove OTHER admin accounts.
+// manages only its OWN password/MFA above; only 'master_admin' ("Global
+// Admin" in the UI) can see, add, or remove OTHER admin accounts.
 // Browser session lane only, same as the rest of /api/security/*.
 // ---------------------------------------------------------------------------
 function requireMasterAdmin(res, session) {
   if (session.role === 'master_admin') return true;
-  sendJson(res, 403, { error: 'Only a Provider / Master Admin account can manage admin accounts.' });
+  sendJson(res, 403, { error: 'Only a Global Admin account can manage admin accounts.' });
   return false;
 }
 
@@ -2134,7 +2291,7 @@ async function handleCreateAccount(req, res, session) {
   }
 
   release('security');
-  log.info(`Admin account "${sanitizeForLog(account.username)}" (${account.role}, mfaRequired=${account.mfaRequired}) created by ` +
+  log.warn(`Admin account "${sanitizeForLog(account.username)}" (${account.role}, mfaRequired=${account.mfaRequired}) created by ` +
     `"${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true, account: accountSummary(account) });
 }
@@ -2156,7 +2313,7 @@ async function handleSetMfaRequired(req, res, session) {
   }
 
   release('security');
-  log.info(`MFA policy for "${sanitizeForLog(username)}" set to required=${required} by ` +
+  log.warn(`MFA policy for "${sanitizeForLog(username)}" set to required=${required} by ` +
     `"${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true, account: accountSummary(account) });
 }
@@ -2170,13 +2327,13 @@ async function handleDeleteAccount(req, res, session) {
 
   if (username === session.username) {
     release('security');
-    return sendJson(res, 400, { error: 'You cannot delete your own account while signed in as it — have another Provider / Master Admin remove it.' });
+    return sendJson(res, 400, { error: 'You cannot delete your own account while signed in as it — have another Global Admin remove it.' });
   }
   const accounts = security.listAccounts();
   const target = accounts.find((a) => a.username === username);
   if (target && target.role === 'master_admin' && accounts.filter((a) => a.role === 'master_admin').length <= 1) {
     release('security');
-    return sendJson(res, 400, { error: 'Cannot delete the only remaining Provider / Master Admin account.' });
+    return sendJson(res, 400, { error: 'Cannot delete the only remaining Global Admin account.' });
   }
 
   try {
@@ -2192,6 +2349,43 @@ async function handleDeleteAccount(req, res, session) {
 
   release('security');
   log.warn(`Admin account "${sanitizeForLog(username)}" deleted by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+// Resets ANOTHER account's password without needing its current one — see
+// security.resetPassword's own comment for the trust-boundary reasoning.
+// Self-reset is refused on purpose: it would let a master_admin bypass
+// changePassword's "prove you know the current password" check for their OWN
+// account (the exact protection that limits what a stolen session cookie can
+// do), so a master_admin resetting their own password still has to go
+// through the normal Security Settings flow like anyone else.
+async function handleResetPassword(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  const username = String(body.username || '');
+  const newPassword = String(body.newPassword || '');
+
+  if (username === session.username) {
+    release('security');
+    return sendJson(res, 400, { error: 'Use Security Settings > Change password to change your own password.' });
+  }
+
+  try {
+    security.resetPassword(username, newPassword);
+  } catch (err) {
+    release('security');
+    return sendJson(res, 400, { error: err.message });
+  }
+
+  // Same reasoning as handleDeleteAccount above — an active session on the
+  // reset account (the account holder's own, or an attacker's) should not
+  // survive the reset.
+  revokeOtherSessionsForUser(username, null);
+
+  release('security');
+  log.warn(`Password reset for admin account "${sanitizeForLog(username)}" by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true });
 }
 
@@ -2295,13 +2489,28 @@ async function handleApiRequest(req, res, ip, presentedKey) {
   // authenticates per-request with the key and carries no cookie.
   const session = { username: 'api', csrf: null, ip, isApi: true };
 
+  // Every successful call on this lane logs at 'info' — a bad/rejected key
+  // already logs at 'blocked' (see above) regardless of verbosity, but a
+  // SUCCESSFUL read leaves no trace unless something writes one; without
+  // this, a valid key could pull the entire config/health/stats/log listing
+  // with zero audit trail. 'info' (not 'warn'/'blocked') is deliberate: API
+  // traffic can be frequent (a monitoring dashboard polling every N seconds),
+  // so this only appears in the file log once an admin actually raises
+  // CONFIG_EDITOR_LOG_LEVEL/LOG_FILE_LEVEL to 'info' or 'debug' — "capture
+  // everything if you want it," not "always capture," which would flood the
+  // default 'connections' tier with routine polling. Mutating calls below
+  // (save/restart/reboot/geoip/etc.) already log via the shared handlers at
+  // 'warn' or higher, same as the browser lane — unaffected by this.
   if (pathname === '/api/config' && method === 'GET') {
+    log.info(`API: config read by ${ip}`);
     return sendJson(res, 200, await buildConfigPayload(session));
   }
   if (pathname === '/api/health' && method === 'GET') {
+    log.info(`API: health read by ${ip}`);
     return sendJson(res, 200, await buildHealth());
   }
   if (pathname === '/api/stats' && method === 'GET') {
+    log.info(`API: stats read by ${ip}`);
     return handleStats(res);
   }
   if (pathname === '/api/save' && method === 'POST') {
@@ -2320,6 +2529,7 @@ async function handleApiRequest(req, res, ip, presentedKey) {
     return handleCert(req, res, session);
   }
   if (pathname === '/api/update/check' && method === 'GET') {
+    log.info(`API: update-check read by ${ip}`);
     return handleUpdateCheck(req, res);
   }
   if (pathname === '/api/update/apply' && method === 'POST') {
@@ -2329,9 +2539,11 @@ async function handleApiRequest(req, res, ip, presentedKey) {
     return handleUpdateRollback(req, res, session);
   }
   if (pathname === '/api/logs' && method === 'GET') {
+    log.info(`API: log file list read by ${ip}`);
     return handleLogsList(res);
   }
   if (pathname === '/api/logs/view' && method === 'GET') {
+    log.info(`API: log file viewed by ${ip}: ${sanitizeForLog(query.get('proxy'))}/${sanitizeForLog(query.get('file'))}`);
     return handleLogsView(res, query);
   }
   if (pathname === '/api/logs/delete' && method === 'POST') {
@@ -2531,6 +2743,9 @@ async function onRequest(req, res) {
     if (pathname === '/api/restart' && method === 'POST') {
       return handleRestart(req, res, session);
     }
+    if (pathname === '/api/reboot' && method === 'POST') {
+      return handleRebootServer(req, res, session);
+    }
     if (pathname === '/api/geoip' && method === 'POST') {
       return handleGeoip(req, res, session);
     }
@@ -2563,6 +2778,9 @@ async function onRequest(req, res) {
     }
     if (pathname === '/api/security/accounts/set-mfa-required' && method === 'POST') {
       return handleSetMfaRequired(req, res, session);
+    }
+    if (pathname === '/api/security/accounts/reset-password' && method === 'POST') {
+      return handleResetPassword(req, res, session);
     }
     if (pathname === '/api/sshkey' && method === 'POST') {
       return handleSshKey(req, res, session);

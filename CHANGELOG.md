@@ -3,6 +3,41 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
+## v1.4.0 — 2026-09-23
+
+### ✨ Added
+
+- **Self-update from the Tools tab**: check for and apply tagged GitHub releases
+  directly from the config editor (or the Management API), with automatic backup
+  and rollback if anything fails. Linux only.
+- **Multiple admin accounts**, each with its own password and MFA, and a role:
+  Global Admin (can also manage other admin accounts) or Firewall Admin. A
+  Global Admin can require MFA on a specific account, forcing setup at next
+  login.
+- **Full server reboot** (Tools tab, Global Admin only, off by default —
+  enable it in Settings first). A meaningfully bigger action than the existing
+  "Restart firewall" button: it reboots the whole host, not just the app. Requires
+  typing "REBOOT" to confirm, and is refused unless BBSFirewall can confirm pm2
+  has a working boot-time service on the host, with a live pre-flight check shown
+  before you ever get to the confirmation box.
+- **Unauthenticated `GET /status`** endpoint for uptime monitors (e.g. Uptime
+  Kuma), gated by its own trusted-host list.
+- **Random username / password generators** in "Add admin account" and the
+  password-change form — the password generator uses the browser's crypto API
+  and fills/reveals/copies a policy-compliant password in one click.
+- **Light theme**, alongside the existing dark theme. A toggle in the header
+  switches instantly and remembers your choice; the login and MFA screens pick
+  up the saved (or OS-preferred) theme automatically.
+
+### 🐛 Fixes
+
+- GeoIP database download no longer hangs when a host's IPv6 route is
+  configured but not actually reachable.
+- GeoIP "Update database" no longer deletes the existing database before
+  confirming a replacement can be downloaded.
+- The web-redirect TLS certificate button no longer silently reuses the config
+  editor's certificate when both cover the same hostname.
+
 ## v1.3.7 — 2026-09-17
 
 ### 🐛 Fixes

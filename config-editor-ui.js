@@ -33,137 +33,215 @@ function toolsIcon(name) {
     key: '<circle cx="6" cy="14" r="3"/><path d="M8.2 11.8L16 4M13 7l2 2M15.5 4.5l2 2"/>',
     lock: '<rect x="4.5" y="9" width="11" height="8" rx="1.5"/><path d="M6.5 9V6.5a3.5 3.5 0 017 0V9"/>',
     refresh: '<path d="M4 10a6 6 0 0110-4.2M16 10a6 6 0 01-10 4.2"/><path d="M14 3v3h-3M6 17v-3h3"/>',
+    power: '<path d="M10 4v6"/><path d="M6 6.2a6.3 6.3 0 1 0 8 0"/>',
   };
   return '<svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (paths[name] || '') + '</svg>';
 }
 
+// Theme: CSS custom properties on :root hold the dark palette (this app's
+// original, unchanged look — every value below is the exact hex that used to
+// be hardcoded inline); :root[data-theme="light"] redefines the same tokens
+// for the light theme added alongside it. Nothing else in BASE_CSS below
+// references a raw hex color any more - everything goes through var(--...)
+// so the two themes can never drift out of sync with each other.
+const THEME_CSS = `
+  :root {
+    --bg: #0f1720; --bg-card: #16212e; --bg-input: #0f1a25; --bg-sub: #101b26;
+    --bg-hover: #1c2b3c; --bg-control: #22344a; --bg-console: #0a1017;
+    --bg-bar: #0d1620ee; --overlay: #05080ccc; --shadow: rgba(0,0,0,.45);
+    --border: #26374a; --border-2: #263a4e; --border-3: #2c3f54; --border-sub: #203044;
+    --border-dashed: #26374a;
+    --text: #d7e0ea; --text-heading: #f2f6fb; --text-label: #eef3f9;
+    --text-input: #e6edf5; --text-muted: #7f93a8; --text-dim: #93a7bc;
+    --text-body-dim: #b9c9da; --text-sub-heading: #cfe0f2; --text-console: #cdd9e5;
+    --link: #6fb3ff; --accent: #2f6df0; --accent-text: #fff; --heart: #e0546b;
+    --meter-track: #21303f; --meter-warn: #d99a2b; --meter-crit: #d9534f;
+    --danger-bg: #3a1620; --danger-border: #7a2233; --danger-text: #ffd7de;
+    --danger-btn-bg: #7a2233; --danger-btn-border: #92304a; --danger-btn-text: #ffe9ee;
+    --danger-pill-text: #ffb3c0;
+    --ok-bg: #14301f; --ok-border: #2e6b45; --ok-text: #d6f5e2; --ok-pill-text: #7fe0a4;
+    --warn-bg: #322612; --warn-border: #7a5a1f; --warn-text: #ffe9c2; --warn-pill-text: #ffdf9e;
+    --qr-bg: #fff;
+    --focus-ring: #3b82f6;
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f6f9; --bg-card: #ffffff; --bg-input: #f0f2f6; --bg-sub: #eef1f5;
+    --bg-hover: #e7ecf2; --bg-control: #e9edf3; --bg-console: #eef1f5;
+    --bg-bar: #ffffffee; --overlay: #0b101699; --shadow: rgba(20,30,45,.14);
+    --border: #d7dee6; --border-2: #d3dbe4; --border-3: #c7d0db; --border-sub: #dde3ea;
+    --border-dashed: #d7dee6;
+    --text: #26313d; --text-heading: #10151c; --text-label: #10151c;
+    --text-input: #1a222c; --text-muted: #5c6b7a; --text-dim: #46566a;
+    --text-body-dim: #435160; --text-sub-heading: #24405c; --text-console: #2a3542;
+    --link: #205fc7; --accent: #2f6df0; --accent-text: #fff; --heart: #c23955;
+    --meter-track: #dfe5ec; --meter-warn: #b9791c; --meter-crit: #c74440;
+    --danger-bg: #fdecee; --danger-border: #e2a6b1; --danger-text: #8a1c2c;
+    --danger-btn-bg: #c0293f; --danger-btn-border: #a3223590; --danger-btn-text: #fff;
+    --danger-pill-text: #a3213a;
+    --ok-bg: #e9f7ee; --ok-border: #9dd2b1; --ok-text: #1c5c34; --ok-pill-text: #1f7a43;
+    --warn-bg: #fdf3e0; --warn-border: #e7c583; --warn-text: #7a5510; --warn-pill-text: #8a6110;
+    --qr-bg: #fff;
+    --focus-ring: #2f6df0;
+  }
+`;
+
 const BASE_CSS = `
-  * { box-sizing: border-box; }
-  body { margin: 0; background: #0f1720; color: #d7e0ea;
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--border-3) var(--bg-card); }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: var(--bg-card); }
+  *::-webkit-scrollbar-thumb { background: var(--border-3); border-radius: 6px; border: 2px solid var(--bg-card); background-clip: padding-box; }
+  *::-webkit-scrollbar-thumb:hover { background: var(--text-muted); background-clip: padding-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  a { color: #6fb3ff; }
-  h1, h2, h3 { color: #f2f6fb; font-weight: 600; }
+  a { color: var(--link); }
+  h1, h2, h3 { color: var(--text-heading); font-weight: 600; }
+  h4 { color: var(--text-heading); font-weight: 700; font-size: 16px; }
   .wrap { max-width: 960px; margin: 0 auto; padding: 24px 20px 96px; }
-  .card { background: #16212e; border: 1px solid #26374a; border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
   .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
   .brand .logo { height: 30px; width: auto; display: block; }
-  .brand .tag { font-size: 12px; color: #7f93a8; }
+  .brand .logo-light { display: none; }
+  :root[data-theme="light"] .brand .logo-dark { display: none; }
+  :root[data-theme="light"] .brand .logo-light { display: block; }
+  .brand .tag { font-size: 12px; color: var(--text-muted); }
   .brand-home { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; border-radius: 6px; }
   .brand-home:hover .logo { opacity: 0.85; }
-  .brand-home:focus-visible { outline: 2px solid #3b82f6; outline-offset: 3px; }
-  .footer-credit { text-align: center; color: #7f93a8; font-size: 12px; line-height: 1.7; margin: 32px 0 0; }
-  .footer-credit .heart { color: #e0546b; }
+  .brand-home:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+  .footer-credit { text-align: center; color: var(--text-muted); font-size: 12px; line-height: 1.7; margin: 32px 0 0; }
+  .footer-credit .heart { color: var(--heart); }
   .user-menu { position: relative; }
-  .user-menu-trigger { background: none; border: 1px solid transparent; color: #eef3f9; font: inherit;
+  .theme-toggle { background: none; border: 1px solid var(--border); color: var(--text-label);
+    display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px;
+    border-radius: 7px; cursor: pointer; padding: 0; }
+  .theme-toggle:hover { background: var(--bg-hover); }
+  .theme-toggle svg { width: 17px; height: 17px; }
+  .user-menu-trigger { background: none; border: 1px solid transparent; color: var(--text-label); font: inherit;
     font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
     padding: 6px 10px; border-radius: 7px; }
-  .user-menu-trigger:hover, .user-menu-trigger[aria-expanded="true"] { background: #1c2b3c; border-color: #26374a; }
-  .user-menu-trigger .caret { font-size: 11px; color: #7f93a8; }
+  .user-menu-trigger:hover, .user-menu-trigger[aria-expanded="true"] { background: var(--bg-hover); border-color: var(--border); }
+  .user-menu-trigger .caret { font-size: 11px; color: var(--text-muted); }
   .user-menu-panel { position: absolute; right: 0; top: calc(100% + 6px); min-width: 190px;
-    background: #16212e; border: 1px solid #26374a; border-radius: 9px; padding: 6px;
-    box-shadow: 0 12px 28px rgba(0,0,0,.45); z-index: 40; }
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 9px; padding: 6px;
+    box-shadow: 0 12px 28px var(--shadow); z-index: 40; }
   .user-menu-panel button { display: block; width: 100%; text-align: left; background: none;
-    border: none; color: #d7e0ea; font-weight: 400; padding: 9px 10px; border-radius: 6px;
+    border: none; color: var(--text); font-weight: 400; padding: 9px 10px; border-radius: 6px;
     cursor: pointer; }
-  .user-menu-panel button:hover { background: #22344a; }
-  .icon { width: 16px; height: 16px; vertical-align: -3px; margin-right: 7px; color: #6fb3ff; flex: none; }
-  .qr-wrap { display: flex; justify-content: center; padding: 10px; background: #fff; border-radius: 8px;
+  .user-menu-panel button:hover { background: var(--bg-control); }
+  .icon { width: 16px; height: 16px; vertical-align: -3px; margin-right: 7px; color: var(--link); flex: none; }
+  .qr-wrap { display: flex; justify-content: center; padding: 10px; background: var(--qr-bg); border-radius: 8px;
     max-width: 220px; margin: 10px auto; }
   .backup-codes { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
-    background: #0f1a25; border: 1px solid #263a4e; border-radius: 7px; padding: 12px 14px;
+    background: var(--bg-input); border: 1px solid var(--border-2); border-radius: 7px; padding: 12px 14px;
     display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
-  label { display: block; font-weight: 600; margin-bottom: 4px; color: #eef3f9; }
+  label { display: block; font-weight: 600; margin-bottom: 4px; color: var(--text-label); }
   input[type=text], input[type=password], input[type=number], textarea, select {
-    width: 100%; padding: 8px 10px; background: #0f1a25; color: #e6edf5;
-    border: 1px solid #2c3f54; border-radius: 6px; font: inherit; }
+    width: 100%; padding: 8px 10px; background: var(--bg-input); color: var(--text-input);
+    border: 1px solid var(--border-3); border-radius: 6px; font: inherit; }
   input:disabled, textarea:disabled, select:disabled { opacity: 0.45; }
   textarea { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
   button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 7px;
-    border: 1px solid #2c3f54; background: #22344a; color: #eaf1f8; cursor: pointer; }
-  button.primary { background: #2f6df0; border-color: #2f6df0; color: #fff; }
-  button.danger  { background: #7a2233; border-color: #92304a; color: #ffe9ee; }
+    border: 1px solid var(--border-3); background: var(--bg-control); color: var(--text-label); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger  { background: var(--danger-btn-bg); border-color: var(--danger-btn-border); color: var(--danger-btn-text); }
   button.small { padding: 5px 10px; font-size: 12px; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .muted { color: #7f93a8; }
+  .muted { color: var(--text-muted); }
   .field { margin-bottom: 14px; }
-  .field .help { font-weight: 400; color: #93a7bc; font-size: 12px; margin-top: 3px; }
+  .field .help { font-weight: 400; color: var(--text-dim); font-size: 12px; margin-top: 3px; }
   .field.optional-off input, .field.optional-off select { opacity: 0.45; }
   .toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .toggle-row input[type=checkbox] { width: auto; }
   details.more { margin-top: 4px; }
-  details.more > summary { cursor: pointer; color: #6fb3ff; font-size: 12px; list-style: none; }
+  details.more > summary { cursor: pointer; color: var(--link); font-size: 12px; list-style: none; }
   details.more > summary::-webkit-details-marker { display: none; }
   details.more > summary::before { content: "\\25b8 "; }
   details.more[open] > summary::before { content: "\\25be "; }
-  details.more .body { white-space: pre-wrap; font-size: 12.5px; color: #b9c9da;
-    background: #0f1a25; border: 1px solid #263a4e; border-radius: 6px; padding: 10px 12px; margin-top: 6px; }
-  .sec-help { color: #93a7bc; font-size: 12.5px; margin: 0 0 12px; }
-  details.sec { border: 1px solid #26374a; border-radius: 9px; margin: 0 0 12px; padding: 0 18px; }
+  details.more .body { white-space: pre-wrap; font-size: 12.5px; color: var(--text-body-dim);
+    background: var(--bg-input); border: 1px solid var(--border-2); border-radius: 6px; padding: 10px 12px; margin-top: 6px; }
+  .sec-help { color: var(--text-dim); font-size: 12.5px; margin: 0 0 12px; }
+  details.sec { border: 1px solid var(--border); border-radius: 9px; margin: 0 0 12px; padding: 0 18px; }
   details.sec > summary { cursor: pointer; list-style: none; padding: 13px 0; font-weight: 700;
-    color: #f2f6fb; font-size: 15px; }
+    color: var(--text-heading); font-size: 15px; }
   details.sec > summary::-webkit-details-marker { display: none; }
-  details.sec > summary::before { content: "\\25b8 "; color: #6fb3ff; font-size: 12px; }
+  details.sec > summary::before { content: "\\25b8 "; color: var(--link); font-size: 12px; }
   details.sec[open] > summary::before { content: "\\25be "; }
-  details.sec > summary .sec-count { font-weight: 400; color: #7f93a8; font-size: 12px; margin-left: 8px; }
+  details.sec > summary .sec-count { font-weight: 400; color: var(--text-muted); font-size: 12px; margin-left: 8px; }
   details.sec .sec-body { padding: 2px 0 16px; }
-  details.sec-sub { border: 1px solid #203044; border-radius: 8px; margin: 8px 0 0; padding: 0 14px; background: #101b26; }
+  details.sec-sub { border: 1px solid var(--border-sub); border-radius: 8px; margin: 8px 0 0; padding: 0 14px; background: var(--bg-sub); }
   details.sec-sub > summary { cursor: pointer; list-style: none; padding: 10px 0; font-weight: 600;
-    color: #cfe0f2; font-size: 13px; display: flex; align-items: center; }
+    color: var(--text-sub-heading); font-size: 13px; display: flex; align-items: center; }
   details.sec-sub > summary::-webkit-details-marker { display: none; }
-  details.sec-sub > summary::before { content: "\\25b8 "; color: #6fb3ff; font-size: 11px; }
+  details.sec-sub > summary::before { content: "\\25b8 "; color: var(--link); font-size: 11px; }
   details.sec-sub[open] > summary::before { content: "\\25be "; }
-  details.sec-sub > summary .sec-count { font-weight: 400; color: #7f93a8; font-size: 12px; margin-left: 8px; }
+  details.sec-sub > summary .sec-count { font-weight: 400; color: var(--text-muted); font-size: 12px; margin-left: 8px; }
   details.sec-sub .sec-body { padding: 0 0 12px; }
   .log-older-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
-    color: #7f93a8; margin: 16px 0 8px; padding-top: 12px; border-top: 1px dashed #26374a; }
+    color: var(--text-muted); margin: 16px 0 8px; padding-top: 12px; border-top: 1px dashed var(--border-dashed); }
   .tabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
-  .tabs button { background: #16212e; }
-  .tabs button.active { background: #2f6df0; border-color: #2f6df0; color: #fff; }
-  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: #0d1620ee;
-    border-top: 1px solid #26374a; padding: 12px 20px; backdrop-filter: blur(4px); }
+  .tabs button { background: var(--bg-card); }
+  .tabs button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg-bar);
+    border-top: 1px solid var(--border); padding: 12px 20px; backdrop-filter: blur(4px); }
   .bar .inner { max-width: 960px; margin: 0 auto; display: flex; gap: 10px; align-items: center; }
   .bar .spacer, .spacer { flex: 1; }
   .notice { padding: 10px 12px; border-radius: 7px; margin-bottom: 14px; font-size: 13px; white-space: pre-wrap; }
-  .notice.err { background: #3a1620; border: 1px solid #7a2233; color: #ffd7de; }
-  .notice.ok  { background: #14301f; border: 1px solid #2e6b45; color: #d6f5e2; }
-  .notice.warn { background: #322612; border: 1px solid #7a5a1f; color: #ffe9c2; }
+  .notice.err { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); }
+  .notice.ok  { background: var(--ok-bg); border: 1px solid var(--ok-border); color: var(--ok-text); }
+  .notice.warn { background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text); }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .pw-wrap { position: relative; }
   .pw-wrap button { position: absolute; right: 4px; top: 4px; padding: 4px 8px; font-size: 12px; }
   .hidden { display: none !important; }
-  .statline { font-size: 12px; color: #7f93a8; margin-top: 10px; }
+  .statline { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
-  .stat { background: #0f1a25; border: 1px solid #26374a; border-radius: 9px; padding: 14px; }
-  .stat .k { font-size: 12px; color: #7f93a8; text-transform: uppercase; letter-spacing: .04em; }
-  .stat .v { font-size: 22px; font-weight: 700; color: #f2f6fb; margin-top: 4px; }
-  .stat .sub { font-size: 12px; color: #93a7bc; margin-top: 2px; }
-  .meter { height: 6px; background: #21303f; border-radius: 4px; margin-top: 8px; overflow: hidden; }
-  .meter > i { display: block; height: 100%; background: #2f6df0; }
-  .meter.warn > i { background: #d99a2b; }
-  .meter.crit > i { background: #d9534f; }
-  .console { background: #0a1017; border: 1px solid #26374a; border-radius: 7px; padding: 10px 12px;
+  .stat { background: var(--bg-input); border: 1px solid var(--border); border-radius: 9px; padding: 14px; }
+  .stat .k { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+  .stat .v { font-size: 22px; font-weight: 700; color: var(--text-heading); margin-top: 4px; }
+  .stat .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .meter { height: 6px; background: var(--meter-track); border-radius: 4px; margin-top: 8px; overflow: hidden; }
+  .meter > i { display: block; height: 100%; background: var(--accent); }
+  .meter.warn > i { background: var(--meter-warn); }
+  .meter.crit > i { background: var(--meter-crit); }
+  .console { background: var(--bg-console); border: 1px solid var(--border); border-radius: 7px; padding: 10px 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
-    color: #cdd9e5; white-space: pre-wrap; max-height: 320px; overflow: auto; margin-top: 10px; }
+    color: var(--text-console); white-space: pre-wrap; max-height: 320px; overflow: auto; margin-top: 10px; }
   .kv { font-size: 13px; }
   .kv div { display: flex; gap: 8px; padding: 2px 0; }
-  .kv div b { color: #93a7bc; font-weight: 600; min-width: 130px; }
+  .kv div b { color: var(--text-dim); font-weight: 600; min-width: 130px; }
   .pill { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-  .pill.good { background: #14301f; color: #7fe0a4; border: 1px solid #2e6b45; }
-  .pill.bad  { background: #3a1620; color: #ffb3c0; border: 1px solid #7a2233; }
-  .pill.warn { background: #322612; color: #ffdf9e; border: 1px solid #7a5a1f; }
-  .modal-bg { position: fixed; inset: 0; background: #05080ccc; display: flex; align-items: center;
-    justify-content: center; z-index: 50; }
-  .modal { background: #16212e; border: 1px solid #2c3f54; border-radius: 12px; padding: 22px;
-    max-width: 440px; width: calc(100% - 40px); }
+  .pill.good { background: var(--ok-bg); color: var(--ok-pill-text); border: 1px solid var(--ok-border); }
+  .pill.bad  { background: var(--danger-bg); color: var(--danger-pill-text); border: 1px solid var(--danger-border); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn-pill-text); border: 1px solid var(--warn-border); }
+  .modal-bg { position: fixed; inset: 0; background: var(--overlay); display: flex; justify-content: center;
+    z-index: 50; overflow-y: auto; padding: 40px 20px; }
+  .modal { background: var(--bg-card); border: 1px solid var(--border-3); border-radius: 12px; padding: 22px;
+    max-width: 440px; width: calc(100% - 40px); height: fit-content; max-height: calc(100vh - 80px); overflow-y: auto; }
   .logtable-wrap { overflow-x: auto; }
   .logtable { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .logtable th, .logtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #26374a; white-space: nowrap; }
-  .logtable th { color: #93a7bc; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .logtable th, .logtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .logtable th { color: var(--text-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 `;
+
+// Sets data-theme on <html> before the body paints, from a saved choice or
+// (first visit) the browser's prefers-color-scheme, so there is never a
+// flash of the wrong theme. Defined once and interpolated into every page
+// function below via ${THEME_INIT_JS} - it is a plain, already-fully-parsed
+// string value at that point, not literal source text, so none of the
+// backslash-doubling rules for text written directly inside a page's own
+// template literal apply to it (see the appPage GOTCHA comment elsewhere in
+// this file for why that distinction matters).
+const THEME_INIT_JS = `(function () {
+  try {
+    var t = localStorage.getItem("bbsfw-theme");
+    if (!t) t = (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark";
+    if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+  } catch (e) {}
+})();`;
 
 function loginPage(opts = {}) {
   const err = opts.error ? `<div class="notice err">${htmlEscape(opts.error)}</div>` : '';
+  const nonce = htmlEscape(opts.nonce || '');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -171,11 +249,13 @@ function loginPage(opts = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BBSFirewall - Config Editor</title>
 <link rel="icon" href="/favicon.ico">
-<style>${BASE_CSS}</style>
+<style>${THEME_CSS}${BASE_CSS}</style>
+<script nonce="${nonce}">${THEME_INIT_JS}</script>
 </head>
 <body>
 <div class="wrap" style="max-width:420px;margin-top:9vh">
-  <div class="brand"><img class="logo" src="/assets/logo.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
+  <div class="brand"><img class="logo logo-dark" src="/assets/logo.svg" alt="BBSFirewall">
+    <img class="logo logo-light" src="/assets/logo-light.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
   <div class="card">
     ${err}
     <form method="POST" action="login" autocomplete="off">
@@ -213,11 +293,13 @@ function mfaPage(opts = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BBSFirewall - Config Editor</title>
 <link rel="icon" href="/favicon.ico">
-<style>${BASE_CSS}</style>
+<style>${THEME_CSS}${BASE_CSS}</style>
+<script nonce="${nonce}">${THEME_INIT_JS}</script>
 </head>
 <body>
 <div class="wrap" style="max-width:420px;margin-top:9vh">
-  <div class="brand"><img class="logo" src="/assets/logo.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
+  <div class="brand"><img class="logo logo-dark" src="/assets/logo.svg" alt="BBSFirewall">
+    <img class="logo logo-light" src="/assets/logo-light.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
   <div class="card">
     <div id="notice"></div>
     <p class="muted" style="margin-top:0">Enter the 6-digit code from your authenticator app, or one of your backup codes.</p>
@@ -291,11 +373,13 @@ function mfaSetupRequiredPage(opts = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BBSFirewall - Config Editor</title>
 <link rel="icon" href="/favicon.ico">
-<style>${BASE_CSS}</style>
+<style>${THEME_CSS}${BASE_CSS}</style>
+<script nonce="${nonce}">${THEME_INIT_JS}</script>
 </head>
 <body>
 <div class="wrap" style="max-width:460px;margin-top:6vh">
-  <div class="brand"><img class="logo" src="/assets/logo.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
+  <div class="brand"><img class="logo logo-dark" src="/assets/logo.svg" alt="BBSFirewall">
+    <img class="logo logo-light" src="/assets/logo-light.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
   <div class="card">
     <div id="notice"></div>
     <h3 style="margin-top:0">Two-factor authentication required</h3>
@@ -382,17 +466,20 @@ function appPage(opts = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BBSFirewall - Config Editor</title>
 <link rel="icon" href="/favicon.ico">
-<style>${BASE_CSS}</style>
+<style>${THEME_CSS}${BASE_CSS}</style>
+<script nonce="${nonce}">${THEME_INIT_JS}</script>
 </head>
 <body>
 <div class="wrap">
   <div class="brand">
     <span class="brand-home" id="brand-home" role="button" tabindex="0" title="Back to Settings">
-      <img class="logo" src="/assets/logo.svg" alt="BBSFirewall">
+      <img class="logo logo-dark" src="/assets/logo.svg" alt="BBSFirewall">
+      <img class="logo logo-light" src="/assets/logo-light.svg" alt="BBSFirewall">
       <span class="tag">config editor</span>
       <span class="tag" id="hdr-ver"></span>
     </span>
     <span class="spacer"></span>
+    <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle light/dark theme"></button>
     <div class="user-menu" id="user-menu">
       <button class="user-menu-trigger" id="user-menu-trigger" type="button" aria-haspopup="true" aria-expanded="false">
         ${user}<span class="caret">&#9662;</span>
@@ -502,6 +589,17 @@ function appPage(opts = {}) {
         <div id="update-backups-list" class="kv"></div>
       </div>
     </div>
+
+    <div class="card hidden" id="tools-reboot-card">
+      <h3 style="margin-top:0">${toolsIcon('power')}Danger zone — full server reboot</h3>
+      <div class="kv" id="reboot-kv"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="danger" id="btn-reboot">Reboot server</button>
+      </div>
+      <div class="help muted">Reboots the whole host, not just BBSFirewall — all telnet/SSH connections
+        drop and the box is unreachable for several minutes with no way to confirm success from here.
+        Use it to unstick a box that "Restart firewall" hasn't fixed. Global Admin only.</div>
+    </div>
   </div>
 
   <div id="tab-performance" class="hidden">
@@ -593,6 +691,8 @@ const ICONS = {
   file: svgIcon('<path d="M6 3h6l4 4v10H6z"/><path d="M12 3v4h4"/><path d="M8 11h6M8 14h6"/>'),
   terminal: svgIcon('<rect x="3" y="4" width="14" height="12" rx="1.5"/><path d="M6 8l3 3-3 3M11 14h4"/>'),
   refresh: svgIcon('<path d="M4 10a6 6 0 0110-4.2M16 10a6 6 0 01-10 4.2"/><path d="M14 3v3h-3M6 17v-3h3"/>'),
+  sun: svgIcon('<circle cx="10" cy="10" r="4"/><path d="M10 2.5v2.5M10 15v2.5M3.5 3.5l1.8 1.8M14.7 14.7l1.8 1.8M2.5 10h2.5M15 10h2.5M3.5 16.5l1.8-1.8M14.7 5.3l1.8-1.8"/>'),
+  moon: svgIcon('<path d="M16.2 12.3A6.8 6.8 0 117.7 3.8a5.3 5.3 0 008.5 8.5z"/>'),
 };
 
 const HINTS = {
@@ -783,6 +883,72 @@ document.addEventListener("click", (e) => {
   notice("ok", "Added " + line + " — click Save to apply.");
 });
 
+/* ---------- username / password generators (Add admin account, Security Settings) ---------- */
+
+// Short, unambiguous words only - no ambiguity between similar-looking words
+// when read aloud or typed by hand. Not security-sensitive (a username isn't
+// a secret), so plain Math.random() is fine here - only genPassword() below
+// needs a CSPRNG.
+const GEN_WORDS = ["amber", "arbor", "aspen", "atlas", "birch", "blaze", "bloom", "brook", "cedar",
+  "clover", "comet", "coral", "crest", "dawn", "delta", "drift", "ember", "falcon", "fern", "flint",
+  "forge", "frost", "glade", "grove", "harbor", "haven", "hazel", "heron", "hollow", "hunter", "indigo",
+  "ivory", "jasper", "juniper", "lark", "linen", "lotus", "lumen", "lunar", "maple", "meadow", "mesa",
+  "mist", "moss", "nova", "oak", "onyx", "opal", "orchid", "otter", "pearl", "pebble", "pine", "plume",
+  "quartz", "quiet", "raven", "reed", "ridge", "river", "robin", "rowan", "sage", "shale", "shore",
+  "silver", "slate", "sparrow", "spruce", "storm", "summit", "swift", "tide", "timber", "topaz",
+  "trail", "vale", "violet", "willow", "wren", "zephyr"];
+
+function genUsername() {
+  const w1 = GEN_WORDS[Math.floor(Math.random() * GEN_WORDS.length)];
+  const w2 = GEN_WORDS[Math.floor(Math.random() * GEN_WORDS.length)];
+  const n = Math.floor(Math.random() * 90) + 10; // 10-99
+  return w1 + "-" + w2 + n;
+}
+
+// Security-sensitive - always crypto.getRandomValues(), never Math.random().
+// Charset deliberately drops visually-confusable characters (0/O, 1/l/I) so a
+// generated password that has to be read off screen and typed somewhere else
+// (a legacy MFA app, a phone) doesn't invite transcription errors.
+function genPassword(len) {
+  len = len || 20;
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_=+";
+  const arr = new Uint32Array(len);
+  crypto.getRandomValues(arr);
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[arr[i] % chars.length];
+  return out;
+}
+
+// Wires a "Generate" button that fills the username-like text field fieldId.
+function wireUsernameGenerator(btnId, fieldId) {
+  const btn = $(btnId);
+  if (btn) btn.addEventListener("click", () => { $(fieldId).value = genUsername(); });
+}
+
+// Wires a "Generate password" button that fills BOTH password fields with the
+// same value, reveals them (type="text", since a masked field the admin can't
+// read is useless right after generating it - they still need to hand this
+// password to whoever will use it), and best-effort copies it to the
+// clipboard. Every call site is inside a modal that has a #sec-notice div, so
+// this always reports through secNotice(), not the global notice() bar (whose
+// (kind, msg) argument order is reversed from secNotice's (msg, kind) anyway).
+function wirePasswordGenerator(btnId, pwId, pw2Id) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const pw = genPassword(20);
+    $(pwId).value = pw;
+    $(pwId).type = "text";
+    if (pw2Id) { $(pw2Id).value = pw; $(pw2Id).type = "text"; }
+    try {
+      await navigator.clipboard.writeText(pw);
+      secNotice("Generated password filled in and copied to clipboard.", "ok");
+    } catch (e) {
+      secNotice("Generated password filled in - copy it now (clipboard access was blocked).", "warn");
+    }
+  });
+}
+
 /* ---------- Tools tab ---------- */
 
 function pill(ok, textOk, textBad, warn) {
@@ -819,6 +985,39 @@ function renderTools() {
     "<div><b>certbot</b>" + pill(!!h.certbotInstalled, "installed", "not installed (auto-installs on issue)", true) + "</div>" +
     certRow("This editor", c.editor, (h.domains || {}).editor) +
     certRow("Web redirect", c.redirect, (h.domains || {}).redirect);
+
+  renderRebootKv(h);
+}
+
+// Separate from the rest of renderTools() so the reboot confirmation modal
+// can call it again with a freshly-fetched health payload right before an
+// admin decides whether to proceed - the card's copy on page load can be
+// stale by the time they actually click the button.
+function renderRebootKv(h) {
+  const kv = $("#reboot-kv");
+  if (!kv) return;
+  if (!h.rebootEnabled) {
+    kv.innerHTML = "<div class='muted'>Disabled. Turn on \\"Allow full server reboot\\" in " +
+      "Settings &gt; Config Editor (and restart) to enable this.</div>";
+    $("#btn-reboot").disabled = true;
+    return;
+  }
+  $("#btn-reboot").disabled = false;
+  const p = h.pm2Startup || {};
+  kv.innerHTML =
+    "<div><b>pm2 boot service</b>" + pill(!!p.enabled, esc(p.unit || "enabled"), "not found / not enabled", true) + "</div>" +
+    "<div><b>&nbsp;&nbsp;running now</b>" + pill(!!p.active, "active", "not active", true) + "</div>" +
+    "<div><b>&nbsp;&nbsp;app saved (pm2 save)</b>" +
+      (p.appSaved === true ? pill(true, "yes", "")
+        : p.appSaved === false ? pill(false, "", "no - run \\"pm2 save\\"", true)
+        : "<span class='muted'>could not check</span>") +
+    "</div>" +
+    "<div><b>Platform</b><span class='muted'>" + esc(h.platform || "") + "</span></div>" +
+    (!p.enabled || !p.active
+      ? "<div class='notice warn' style='margin-top:8px'>Reboot would be blocked right now - the pm2 " +
+        "boot service isn't both enabled and running. Run \\"pm2 startup\\" (follow its printed command) " +
+        "and \\"pm2 save\\" on the host first.</div>"
+      : "");
 }
 
 async function runTool(btn, outSel, url, body) {
@@ -1318,6 +1517,7 @@ async function load() {
     " · uptime " + st.uptimeHuman +
     " · pm2: " + (st.pm2 ? "available" : "not detected") + " · .env: " + st.envPath;
   updateAddIpButtons();
+  $("#tools-reboot-card").classList.toggle("hidden", st.role !== "master_admin");
   renderUpdate();
   loadHealth(); // don't await — Tools-tab data can arrive after the rest of the page
   loadUpdateInfo(); // same — hits GitHub, must not hold up the rest of the page
@@ -1344,6 +1544,28 @@ if (brandHome) {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateTab("settings"); }
   });
 }
+
+/* ---------- light/dark theme toggle ---------- */
+// THEME_INIT_JS (in <head>, runs before paint) already set data-theme from a
+// saved choice or prefers-color-scheme - this just keeps the toggle button's
+// icon/title in sync and persists a manual choice for next time.
+function currentTheme() { return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark"; }
+function applyThemeButton() {
+  const btn = $("#theme-toggle");
+  if (!btn) return;
+  const light = currentTheme() === "light";
+  btn.innerHTML = light ? ICONS.sun : ICONS.moon;
+  btn.title = light ? "Switch to dark theme" : "Switch to light theme";
+}
+function setTheme(t) {
+  if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+  else document.documentElement.removeAttribute("data-theme");
+  try { localStorage.setItem("bbsfw-theme", t); } catch (e) { /* per-viewer convenience only */ }
+  applyThemeButton();
+}
+const themeToggleBtn = $("#theme-toggle");
+if (themeToggleBtn) themeToggleBtn.addEventListener("click", () => setTheme(currentTheme() === "light" ? "dark" : "light"));
+applyThemeButton();
 
 document.addEventListener("input", (e) => {
   if (e.target && e.target.id === "ta-trustedhosts") checkTrustedHosts();
@@ -1446,6 +1668,84 @@ async function waitForReconnect() {
   }
   notice("err", "Editor did not come back within 60s. Reload the page manually.");
   $("#btn-restart").disabled = false;
+}
+
+/* ---------- full server reboot (Global Admin only) ---------- */
+
+$("#btn-reboot").addEventListener("click", async () => {
+  const origLabel = $("#btn-reboot").textContent;
+  $("#btn-reboot").disabled = true;
+  $("#btn-reboot").textContent = "Checking pm2…";
+  let p = (DATA.health && DATA.health.pm2Startup) || {};
+  try {
+    const res = await fetch("api/health", { headers: { "X-CSRF-Token": CSRF } });
+    if (res.status === 401) { location.href = "login"; return; }
+    if (res.ok) {
+      DATA.health = await res.json();
+      renderRebootKv(DATA.health);
+      p = DATA.health.pm2Startup || {};
+    }
+  } catch (e) { /* fall back to whatever we already had, warn below covers it */ }
+  $("#btn-reboot").textContent = origLabel;
+  $("#btn-reboot").disabled = !(DATA.health && DATA.health.rebootEnabled);
+
+  const pm2Ok = !!(p.enabled && p.active);
+  const warning = pm2Ok ? "" :
+    '<div class="notice warn">The pm2 boot service isn’t confirmed enabled + running right now ' +
+    '(boot service ' + (p.enabled ? "enabled" : "NOT enabled") + ', ' +
+    (p.active ? "active" : "NOT active") + '). Rebooting will very likely be refused, or worse, ' +
+    'the host may not bring BBSFirewall back up on its own. Run "pm2 startup" and "pm2 save" on the ' +
+    'host, then try again.</div>';
+
+  modalOpen(
+    '<h3 style="margin-top:0">Reboot the entire server?</h3>' +
+    '<p class="muted">This reboots the whole host, not just BBSFirewall. All telnet/SSH ' +
+    'connections drop and the box is unreachable for several minutes. There is no way to ' +
+    'confirm success from here — if the pm2 boot service is misconfigured, this can leave ' +
+    'the box down until someone reaches it another way (console/SSH).</p>' +
+    warning +
+    '<div class="field"><label for="reboot-confirm-input">Type <b>REBOOT</b> to confirm</label>' +
+    '<input id="reboot-confirm-input" type="text" autocomplete="off"></div>' +
+    '<div id="reboot-modal-notice"></div>' +
+    '<div class="row" style="margin-top:18px;justify-content:flex-end">' +
+    '<button id="reboot-cancel" type="button">Cancel</button>' +
+    '<button class="danger" id="reboot-go" type="button" disabled>Reboot now</button></div>'
+  );
+  const input = $("#reboot-confirm-input");
+  const goBtn = $("#reboot-go");
+  input.addEventListener("input", () => { goBtn.disabled = input.value !== "REBOOT"; });
+  $("#reboot-cancel").addEventListener("click", () => ($("#modal-root").innerHTML = ""));
+  goBtn.addEventListener("click", async () => {
+    goBtn.disabled = true;
+    const r = await api("api/reboot", { confirm: input.value });
+    const d = r.data || {};
+    if (!(r.ok && d.ok)) {
+      const mn = $("#reboot-modal-notice");
+      if (mn) mn.innerHTML = '<div class="notice err">' + esc(d.error || "Reboot failed.") + "</div>";
+      goBtn.disabled = false;
+      return;
+    }
+    $("#modal-root").innerHTML = "";
+    notice("warn", d.message || "Rebooting the server…");
+    $("#btn-reboot").disabled = true;
+    waitForReconnectAfterReboot();
+  });
+});
+
+async function waitForReconnectAfterReboot() {
+  notice("warn", "Server is rebooting — this can take several minutes. Waiting…");
+  const deadline = Date.now() + 360000;
+  await new Promise((r) => setTimeout(r, 15000));
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch("api/config", { headers: { "X-CSRF-Token": CSRF }, cache: "no-store" });
+      if (r.status === 200) { notice("ok", "Reconnected."); location.reload(); return; }
+      if (r.status === 401) { location.href = "login"; return; }
+    } catch (e) { /* still down */ }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  notice("err", "Editor did not come back within 6 minutes. Check the box directly (console/SSH).");
+  $("#btn-reboot").disabled = false;
 }
 
 async function doLogout() {
@@ -2719,9 +3019,10 @@ function renderSecurityMain() {
     '<h4 style="margin-bottom:6px">Change password</h4>' +
     '<div class="field"><label for="sec-cur-pw">Current password</label><input id="sec-cur-pw" type="password" autocomplete="current-password"></div>' +
     '<div class="field"><label for="sec-new-pw">New password</label><input id="sec-new-pw" type="password" autocomplete="new-password"></div>' +
-    '<div class="field"><label for="sec-new-pw2">Confirm new password</label><input id="sec-new-pw2" type="password" autocomplete="new-password"></div>' +
+    '<div class="field"><label for="sec-new-pw2">Confirm new password</label><input id="sec-new-pw2" type="password" autocomplete="new-password">' +
+    '<button class="small" id="sec-gen-pw" type="button" style="margin-top:6px">Generate password</button></div>' +
     '<button class="primary" id="sec-change-pw" type="button">Change password</button>' +
-    '<hr style="border-color:#26374a;margin:18px 0">' +
+    '<hr style="border-color:var(--border);margin:18px 0">' +
     '<h4 style="margin-bottom:6px">Two-factor authentication (MFA)</h4>' +
     '<div class="kv">' + (st.mfaEnabled
       ? "<div><b>Status</b>" + pill(true, "enabled", "") + "</div>" +
@@ -2733,12 +3034,12 @@ function renderSecurityMain() {
         '<button class="small danger" id="sec-mfa-disable" type="button">Disable MFA</button>'
       : '<button class="primary" id="sec-mfa-enable" type="button">Enable MFA</button>') +
     "</div>" +
-    '<hr style="border-color:#26374a;margin:18px 0">' +
+    '<hr style="border-color:var(--border);margin:18px 0">' +
     '<h4 style="margin-bottom:6px">Access</h4>' +
     '<div class="row"><button class="small" id="sec-whitelist-me" type="button">Whitelist my IP' +
       (st.ip ? " (" + esc(st.ip) + ")" : "") + "</button></div>" +
     (st.role === "master_admin" ?
-      '<hr style="border-color:#26374a;margin:18px 0">' +
+      '<hr style="border-color:var(--border);margin:18px 0">' +
       '<h4 style="margin-bottom:6px">Admin accounts</h4>' +
       '<div class="row"><button class="small" id="sec-accounts" type="button">Manage admin accounts</button></div>'
       : "") +
@@ -2747,6 +3048,7 @@ function renderSecurityMain() {
 
   $("#sec-close").addEventListener("click", closeModal);
   if (st.role === "master_admin") $("#sec-accounts").addEventListener("click", renderAccountsList);
+  wirePasswordGenerator("#sec-gen-pw", "#sec-new-pw", "#sec-new-pw2");
 
   $("#sec-change-pw").addEventListener("click", async () => {
     var cur = $("#sec-cur-pw").value;
@@ -2916,7 +3218,7 @@ async function renderAccountsList() {
   renderAccountsTable(d.accounts || []);
 }
 
-const ROLE_LABELS = { master_admin: "Provider / Master Admin", firewall_admin: "Firewall Admin" };
+const ROLE_LABELS = { master_admin: "Global Admin", firewall_admin: "Firewall Admin" };
 function roleLabel(role) { return ROLE_LABELS[role] || role; }
 
 function accountRow(a) {
@@ -2927,7 +3229,9 @@ function accountRow(a) {
     '<button class="small" data-acct-mfareq="' + esc(a.username) + '" data-acct-mfareq-next="' + (a.mfaRequired ? "0" : "1") + '" type="button">' +
     (a.mfaRequired ? "Required" : "Optional") + "</button>" +
     "</td><td>" + esc(fmtDate(a.createdAt)) + "</td><td>" +
-    (isSelf ? "" : '<button class="small danger" data-acct-del="' + esc(a.username) + '" data-acct-role="' + esc(a.role) + '" type="button">Delete</button>') +
+    (isSelf ? "" :
+      '<button class="small" data-acct-resetpw="' + esc(a.username) + '" data-acct-role="' + esc(a.role) + '" type="button">Reset password</button> ' +
+      '<button class="small danger" data-acct-del="' + esc(a.username) + '" data-acct-role="' + esc(a.role) + '" type="button">Delete</button>') +
     "</td></tr>";
 }
 
@@ -2937,6 +3241,9 @@ function renderAccountsTable(accounts) {
     accounts.map(accountRow).join("") + "</tbody></table></div>";
   $("#accounts-table").querySelectorAll("[data-acct-del]").forEach((btn) => {
     btn.addEventListener("click", () => confirmDeleteAccount(btn.dataset.acctDel, btn.dataset.acctRole));
+  });
+  $("#accounts-table").querySelectorAll("[data-acct-resetpw]").forEach((btn) => {
+    btn.addEventListener("click", () => renderResetPassword(btn.dataset.acctResetpw, btn.dataset.acctRole));
   });
   $("#accounts-table").querySelectorAll("[data-acct-mfareq]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -2972,16 +3279,49 @@ function confirmDeleteAccount(username, role) {
   });
 }
 
+function renderResetPassword(username, role) {
+  modalOpen(
+    '<h3 style="margin-top:0">Reset password</h3>' +
+    '<p class="muted">Sets a new password for "' + esc(username) + '" (' + esc(roleLabel(role)) + ") without needing its " +
+    "current one. Any active session on this account is signed out immediately, and it will need this new password " +
+    "next time it signs in.</p>" +
+    '<div id="sec-notice"></div>' +
+    '<div class="field"><label for="resetpw-new">New password</label><input id="resetpw-new" type="password" autocomplete="new-password"></div>' +
+    '<div class="field"><label for="resetpw-new2">Confirm new password</label><input id="resetpw-new2" type="password" autocomplete="new-password">' +
+    '<button class="small" id="resetpw-gen" type="button" style="margin-top:6px">Generate password</button></div>' +
+    '<div class="row" style="margin-top:18px;justify-content:flex-end">' +
+    '<button id="resetpw-cancel" type="button">Cancel</button>' +
+    '<button class="primary" id="resetpw-go" type="button">Reset password</button></div>'
+  );
+  wirePasswordGenerator("#resetpw-gen", "#resetpw-new", "#resetpw-new2");
+  $("#resetpw-cancel").addEventListener("click", renderAccountsList);
+  $("#resetpw-go").addEventListener("click", async () => {
+    const pw1 = $("#resetpw-new").value;
+    const pw2 = $("#resetpw-new2").value;
+    if (pw1 !== pw2) { secNotice("Passwords do not match."); return; }
+    if (pw1.length < 12) { secNotice("Password must be at least 12 characters."); return; }
+    const r = await api("api/security/accounts/reset-password", { username: username, newPassword: pw1 });
+    if (r.ok && r.data && r.data.ok) {
+      notice("ok", 'Password reset for "' + username + '". Give the new password to its owner now.');
+      await renderAccountsList();
+    } else {
+      secNotice((r.data && r.data.error) || "Failed to reset password.");
+    }
+  });
+}
+
 function renderAddAccount() {
   modalOpen(
     '<h3 style="margin-top:0">Add admin account</h3>' +
     '<div id="sec-notice"></div>' +
-    '<div class="field"><label for="acct-user">Username</label><input id="acct-user" type="text" autocomplete="off"></div>' +
+    '<div class="field"><label for="acct-user">Username</label><input id="acct-user" type="text" autocomplete="off">' +
+    '<button class="small" id="acct-gen-user" type="button" style="margin-top:6px">Generate</button></div>' +
     '<div class="field"><label for="acct-pw">Password</label><input id="acct-pw" type="password" autocomplete="new-password"></div>' +
-    '<div class="field"><label for="acct-pw2">Confirm password</label><input id="acct-pw2" type="password" autocomplete="new-password"></div>' +
+    '<div class="field"><label for="acct-pw2">Confirm password</label><input id="acct-pw2" type="password" autocomplete="new-password">' +
+    '<button class="small" id="acct-gen-pw" type="button" style="margin-top:6px">Generate password</button></div>' +
     '<div class="field"><label for="acct-role">Role</label><select id="acct-role">' +
     '<option value="firewall_admin">Firewall Admin (day-to-day admin access)</option>' +
-    '<option value="master_admin">Provider / Master Admin (can also manage other admin accounts)</option>' +
+    '<option value="master_admin">Global Admin (can also manage other admin accounts)</option>' +
     "</select></div>" +
     '<label class="toggle-row"><input type="checkbox" id="acct-mfa-required"> Require MFA on this account</label>' +
     '<div class="row" style="justify-content:flex-end">' +
@@ -2989,6 +3329,8 @@ function renderAddAccount() {
     '<button class="primary" id="acct-create" type="button">Create</button>' +
     "</div>"
   );
+  wireUsernameGenerator("#acct-gen-user", "#acct-user");
+  wirePasswordGenerator("#acct-gen-pw", "#acct-pw", "#acct-pw2");
   $("#sec-back").addEventListener("click", renderAccountsList);
   $("#acct-create").addEventListener("click", async () => {
     const username = $("#acct-user").value.trim();

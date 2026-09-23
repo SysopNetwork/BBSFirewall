@@ -71,8 +71,8 @@ function randomIndex(maxExclusive) {
 // ---------------------------------------------------------------------------
 // store read/write
 // ---------------------------------------------------------------------------
-// 'master_admin' = full access, incl. managing other admin accounts ("Provider
-// / Master Admin" in the UI). 'firewall_admin' = day-to-day access to this
+// 'master_admin' = full access, incl. managing other admin accounts ("Global
+// Admin" in the UI). 'firewall_admin' = day-to-day access to this
 // one firewall only ("Firewall Admin" in the UI). Renamed from the original
 // 'owner'/'provider' pair (v1.4) - LEGACY_ROLES below maps an already-stored
 // old value forward so existing accounts don't need a manual fix-up.
@@ -287,6 +287,27 @@ function deleteAccount(username) {
   writeStore(store);
 }
 
+// master_admin-only, via config-editor.js. Sets a NEW password on ANOTHER
+// account without knowing (or being asked for) its current one - unlike
+// changePassword's self-service flow. The caller's own authenticated
+// master_admin session is the trust boundary here, not proof of the target
+// account's old password: a master_admin can already create and delete any
+// other account outright, so directly resetting one's password is strictly
+// LESS destructive than the delete-then-recreate workaround it replaces (that
+// workaround also silently wipes the account's MFA enrollment and history;
+// this does not).
+function resetPassword(username, newPassword) {
+  const store = loadStore();
+  if (!store) throw new Error('No admin accounts configured.');
+  const account = store.accounts.find((a) => a.username === username);
+  if (!account) throw new Error('No such account.');
+  const pwErr = passwordError(newPassword);
+  if (pwErr) throw new Error(pwErr);
+  account.password = hashPassword(newPassword);
+  writeStore(store);
+  return account;
+}
+
 // ---------------------------------------------------------------------------
 // password policy - length-focused (NIST 800-63B: length matters more than
 // forced character-class complexity, and arbitrary symbol rules mainly
@@ -481,6 +502,7 @@ module.exports = {
   resetToSingleAccount,
   createAccount,
   deleteAccount,
+  resetPassword,
   setMfaRequired,
   hashPassword,
   verifyPassword,

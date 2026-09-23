@@ -147,6 +147,14 @@ const config = {
     // (ERR_EMPTY_RESPONSE). Same port — no extra listener. On by default; set
     // CONFIG_EDITOR_HTTP_REDIRECT_ENABLED=false to just drop such requests.
     httpRedirectEnabled: process.env.CONFIG_EDITOR_HTTP_REDIRECT_ENABLED !== 'false',
+    // Full OS-level reboot from the Tools tab (Provider / Master Admin only,
+    // see config-editor.js's handleRebootServer). Off by default, same
+    // opt-in shape as API_ENABLED/SSH_ENABLED/TRIGGER_BLOCK_ENABLED — a
+    // meaningfully higher-blast-radius action than the always-available
+    // pm2-level restart, so it has to be turned on deliberately, not just
+    // reached by role. Even when this is true, the handler still hard-blocks
+    // unless a live pm2-boot-service check passes at request time.
+    rebootEnabled: process.env.REBOOT_ENABLED === 'true',
   },
 
   // Management API — key-authenticated REST access to everything the config
