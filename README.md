@@ -572,7 +572,7 @@ This works for both telnet and SSH connections.
 
 > ⚠️ **Important:** The backend BBS software must support PROXY Protocol, or have a module/plugin that reads and strips the header before the BBS sees it. **Enabling this against an incompatible backend will break all connections** — the BBS will receive the header line as garbage data at the start of every session.
 
-Compatible backends include HAProxy, Nginx, Synchronet, WWIV, Mystic, and any software with a PROXY Protocol module. Standard MajorBBS/Worldgroup requires a companion MBBS module to handle the header.
+Compatible backends include HAProxy, Nginx, Synchronet, WWIV, Mystic, and any software with a PROXY Protocol module. Standard Major BBS v10 requires a companion MBBS module to handle the header.
 
 Full spec: https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
 
