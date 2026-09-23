@@ -9,6 +9,11 @@ The API is **not** a separate service. It rides on the config editor's HTTPS lis
 (`CONFIG_EDITOR_PORT`, default `8443`) under the `/api/*` paths. The config editor must
 be enabled for the API to work.
 
+> **Not the same thing as `GET /status`.** `/status` is a separate, unauthenticated
+> endpoint on the same port for uptime monitors (Uptime Kuma etc.) — no API key, no
+> session, gated only by `status-trustedhosts.txt`. See the "Status Endpoint" section
+> in the README.
+
 - [Enabling the API](#enabling-the-api)
 - [Authentication](#authentication)
 - [Base URL and TLS](#base-url-and-tls)
@@ -110,6 +115,9 @@ rather than failing — but API clients should call `https://` directly.
 | `POST /api/geoip` | Download / update the MaxMind GeoLite2 database | `{"action": "download"}` \| `{"action": "update"}` |
 | `POST /api/sshkey` | Generate the SSH host key (terminate mode) | `{"type": "rsa"\|"ed25519", "overwrite": false}` |
 | `POST /api/cert` | Issue a Let's Encrypt certificate | `{"target": "editor"\|"redirect"}` |
+| `GET /api/update/check` | Check GitHub for a newer release | — |
+| `POST /api/update/apply` | Download and apply an update, then restart | `{}` or `{"tag": "v1.4.0", "keepSession": false}` |
+| `POST /api/update/rollback` | Restore a previous update backup, then restart | `{"backup": "pre-update-1.3.7-…"}` |
 | `GET /api/logs` | List rotated log files (`file-logger.js`'s per-proxy `logs/<proxy>/` folders) | — |
 | `GET /api/logs/view` | Read one log file's content (tailed if large) | — (`?proxy=` and `?file=` query params) |
 | `POST /api/logs/delete` | Permanently delete one log file | `{"proxy": "telnet", "file": "telnet-2026-09-11.log"}` |
@@ -288,6 +296,37 @@ one gets `429` (see below).
   "certbotInstalled": true, "output": "…", "health": { /* buildHealth() */ } }
 ```
 
+### `GET /api/update/check`, `POST /api/update/apply`, `POST /api/update/rollback`
+
+Self-update, Linux-only (see `updater.js` and the "Updating" section of the README) — a
+Windows host or one without `tar` gets `platformSupported: false` / `tarAvailable: false`
+from the check and any apply/rollback attempt refuses immediately, before touching any
+file. `/api/update/apply` and `/api/update/rollback` both restart the process on success,
+the same way `/api/restart` does — the HTTP response arrives first, then the process
+restarts a moment later. Only one mutating update/restart/save/geoip/sshkey/cert operation
+runs at a time.
+
+```jsonc
+// GET /api/update/check
+{ "currentVersion": "1.3.7", "latestVersion": "1.4.0", "updateAvailable": true,
+  "tagName": "v1.4.0", "releaseNotes": "…markdown…", "publishedAt": "2026-…",
+  "platformSupported": true, "tarAvailable": true,
+  "backups": ["pre-update-1.3.6-2026-…"] }
+
+// POST /api/update/apply {}
+{ "ok": true, "previousVersion": "1.3.7", "newVersion": "1.4.0", "tagName": "v1.4.0",
+  "backup": "pre-update-1.3.7-2026-…", "restarting": true, "keepSession": true,
+  "message": "Updated to v1.4.0. Restarting — …" }
+
+// A failed apply automatically restores the pre-update backup and does NOT restart:
+{ "ok": false, "error": "npm install failed on the new version: …\n\nRestored the previous version (v1.3.7) automatically.",
+  "backup": "pre-update-1.3.7-2026-…", "restored": true }
+
+// POST /api/update/rollback {"backup":"pre-update-1.3.6-2026-…"}
+{ "ok": true, "restoredFrom": "pre-update-1.3.6-2026-…", "newVersion": "1.3.6",
+  "restarting": true, "keepSession": true, "message": "Restored v1.3.6. Restarting — …" }
+```
+
 ### `GET /api/logs`, `GET /api/logs/view`, `POST /api/logs/delete`
 
 Per-proxy rotated log files written by `file-logger.js` (`LOG_FILE_ENABLED=true`), one
@@ -380,8 +419,9 @@ The whole file is replaced with the string you send.
 - **The API key is equivalent to root on the box.** `GET /api/config` returns every
   secret in `.env` (the editor password, the MaxMind key, and `API_KEY` itself);
   `POST /api/save` can rewrite `.env`; `/api/restart`, `/api/sshkey`, `/api/cert` run
-  commands. Treat `API_KEY` with the same care as the server's SSH password. Rotate it
-  (edit `.env`, restart) if the dashboard is ever compromised.
+  commands; `/api/update/apply` replaces the running code entirely (with an automatic
+  rollback if it fails validation). Treat `API_KEY` with the same care as the server's
+  SSH password. Rotate it (edit `.env`, restart) if the dashboard is ever compromised.
 - **Restrict by IP.** Put the dashboard's address in `api-trustedhosts.txt`.
 - **Log files can contain caller IPs and raw connection data** (depending on the
   configured file-log level), and `POST /api/logs/delete` removes them with no
@@ -422,6 +462,13 @@ curl -s "$API/api/save" -H "Authorization: Bearer $KEY" \
 
 # restart to apply .env changes
 curl -s "$API/api/save" >/dev/null ; curl -s -X POST "$API/api/restart" -H "Authorization: Bearer $KEY"
+
+# check for and apply an update, or roll one back
+curl -s "$API/api/update/check" -H "Authorization: Bearer $KEY"
+curl -s -X POST "$API/api/update/apply" -H "Authorization: Bearer $KEY"
+curl -s -X POST "$API/api/update/rollback" -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  --data-raw '{"backup":"pre-update-1.3.7-2026-09-22T12-00-00-000Z"}'
 
 # list log files, view one, delete one
 curl -s "$API/api/logs" -H "Authorization: Bearer $KEY"

@@ -31,15 +31,15 @@ if (fs.existsSync(DB_PATH) && FORCE) {
   const stats = fs.statSync(DB_PATH);
   const age = Math.floor((Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24));
   console.log(`Replacing existing database (${age} days old)...`);
-  try {
-    fs.unlinkSync(DB_PATH);
-  } catch (err) {
-    console.error(`Could not remove the old database: ${err.message}`);
-    process.exit(1);
-  }
+  // Deliberately NOT deleted here. The old file stays in place and serving
+  // until a new one has been fully downloaded and extracted below, where
+  // fs.renameSync() atomically swaps it in. Deleting it up front used to mean
+  // ANY download failure (bad key, MaxMind outage, a network hiccup) left the
+  // box with no database at all — including a manually-uploaded one, which is
+  // never re-downloadable by definition.
 }
 
-if (fs.existsSync(DB_PATH)) {
+if (fs.existsSync(DB_PATH) && !FORCE) {
   const stats = fs.statSync(DB_PATH);
   const age = Math.floor((Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24));
   console.log(`Database already exists (${age} days old)`);
@@ -75,13 +75,26 @@ if (licenseKey) {
 
   console.log('Downloading...');
 
+  // family: 4 — some hosts advertise a global IPv6 address (and a default
+  // route for it) that is not actually routable to the internet. Node's
+  // https.get has no Happy-Eyeballs fallback (unlike curl), so if DNS returns
+  // an AAAA record it connects to that dead end and hangs for Linux's own TCP
+  // SYN-retry timeout (~70-90s) before failing with ETIMEDOUT. MaxMind/
+  // Cloudflare serve identically over IPv4, so forcing it sidesteps the whole
+  // class of problem. The explicit `timeout` below is a second, independent
+  // safety net for any other kind of network hang.
+  const DOWNLOAD_TIMEOUT_MS = 20000;
+
   try {
     const file = fs.createWriteStream(tarPath);
 
-    https.get(url, (response) => {
+    const cleanupPartial = () => { if (fs.existsSync(tarPath)) fs.unlinkSync(tarPath); };
+
+    const req = https.get(url, { family: 4, timeout: DOWNLOAD_TIMEOUT_MS }, (response) => {
       if (response.statusCode !== 200) {
         console.error(`Download failed: HTTP ${response.statusCode}`);
         console.error('Check your license key or download manually.');
+        cleanupPartial();
         process.exit(1);
       }
 
@@ -101,6 +114,8 @@ if (licenseKey) {
           if (extractedDir) {
             const mmdbSource = path.join(DATA_DIR, extractedDir, 'GeoLite2-Country.mmdb');
             if (fs.existsSync(mmdbSource)) {
+              // Atomic on POSIX: replaces DB_PATH (if it exists) in one step,
+              // so there is never a moment with no database on disk.
               fs.renameSync(mmdbSource, DB_PATH);
               fs.unlinkSync(tarPath);
               fs.rmSync(path.join(DATA_DIR, extractedDir), { recursive: true });
@@ -111,18 +126,26 @@ if (licenseKey) {
           }
 
           console.error('Could not find .mmdb file in extracted archive');
+          console.error('The previous database (if any) was left untouched.');
+          cleanupPartial();
           process.exit(1);
         } catch (err) {
           console.error(`Extraction failed: ${err.message}`);
-          console.error('Please extract manually and place GeoLite2-Country.mmdb in:');
-          console.error(DB_PATH);
+          console.error('The previous database (if any) was left untouched.');
+          cleanupPartial();
           process.exit(1);
         }
       });
     }).on('error', (err) => {
-      if (fs.existsSync(tarPath)) fs.unlinkSync(tarPath);
+      cleanupPartial();
       console.error(`Download error: ${err.message}`);
+      console.error('The previous database (if any) was left untouched.');
       process.exit(1);
+    });
+
+    req.on('timeout', () => {
+      req.destroy(new Error(`connection timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s ` +
+        '(check network/firewall connectivity to download.maxmind.com)'));
     });
   } catch (err) {
     console.error(`Error: ${err.message}`);

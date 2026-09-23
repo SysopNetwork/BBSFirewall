@@ -13,6 +13,7 @@ whitelist.txt
 trustedhosts.txt
 triggers.txt
 api-trustedhosts.txt
+status-trustedhosts.txt
 
 # Config editor .env backups + carried-over session store
 .env.bak.*
@@ -29,6 +30,9 @@ ssh_host_key.pub
 
 # TLS certificates and ACME webroot — private keys stay off GitHub
 certs/
+
+# Self-update backups (updater.js / update.js)
+update-backups/
 
 # Logs
 *.log

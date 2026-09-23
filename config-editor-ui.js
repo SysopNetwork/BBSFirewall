@@ -5,9 +5,10 @@
  * All CSS and client JavaScript is inlined so there is no build step and no
  * static asset routes to secure. The app shell pulls its data from
  * /api/config after load and posts changes back to /api/save; the Performance
- * tab polls /api/stats; the Tools tab pulls /api/health (fetched separately,
- * without blocking the rest of the page — see loadHealth()) and drives
- * /api/geoip, /api/sshkey and /api/cert.
+ * tab polls /api/stats; the Tools tab pulls /api/health and /api/update/check
+ * (both fetched separately, without blocking the rest of the page — see
+ * loadHealth()/loadUpdateInfo()) and drives /api/geoip, /api/sshkey,
+ * /api/cert, and /api/update/apply|rollback.
  *
  * https://github.com/SysopNetwork/BBSFirewall
  */
@@ -31,6 +32,7 @@ function toolsIcon(name) {
     globe: '<circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c2.5 2 2.5 12 0 14M10 3c-2.5 2-2.5 12 0 14"/>',
     key: '<circle cx="6" cy="14" r="3"/><path d="M8.2 11.8L16 4M13 7l2 2M15.5 4.5l2 2"/>',
     lock: '<rect x="4.5" y="9" width="11" height="8" rx="1.5"/><path d="M6.5 9V6.5a3.5 3.5 0 017 0V9"/>',
+    refresh: '<path d="M4 10a6 6 0 0110-4.2M16 10a6 6 0 01-10 4.2"/><path d="M14 3v3h-3M6 17v-3h3"/>',
   };
   return '<svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (paths[name] || '') + '</svg>';
@@ -329,6 +331,7 @@ function appPage(opts = {}) {
       ['trustedhosts', 'Trusted Hosts', false],
       ['triggers', 'Triggers', false],
       ['apihosts', 'API Trusted Hosts', false],
+      ['statushosts', 'Status Endpoint Trusted Hosts', false],
     ].map(([n, label, addIp]) => `
     <details class="sec">
       <summary>${label}<span class="sec-count" id="path-${n}"></span></summary>
@@ -384,6 +387,21 @@ function appPage(opts = {}) {
         sections and Save first. Port 80 must be reachable and DNS must point here. Certbot is installed
         automatically if missing.</div>
       <div class="console hidden" id="cert-out"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">${toolsIcon('refresh')}Updates</h3>
+      <div class="kv" id="update-kv"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-update-check">Check for updates</button>
+        <button class="primary hidden" id="btn-update-apply">Update now</button>
+      </div>
+      <div class="help muted" id="update-note"></div>
+      <div class="console hidden" id="update-notes-out"></div>
+      <div id="update-backups-wrap" class="hidden" style="margin-top:14px">
+        <div style="font-weight:600;margin-bottom:6px">Backups</div>
+        <div id="update-backups-list" class="kv"></div>
+      </div>
     </div>
   </div>
 
@@ -475,6 +493,7 @@ const ICONS = {
   key: svgIcon('<circle cx="6" cy="14" r="3"/><path d="M8.2 11.8L16 4M13 7l2 2M15.5 4.5l2 2"/>'),
   file: svgIcon('<path d="M6 3h6l4 4v10H6z"/><path d="M12 3v4h4"/><path d="M8 11h6M8 14h6"/>'),
   terminal: svgIcon('<rect x="3" y="4" width="14" height="12" rx="1.5"/><path d="M6 8l3 3-3 3M11 14h4"/>'),
+  refresh: svgIcon('<path d="M4 10a6 6 0 0110-4.2M16 10a6 6 0 01-10 4.2"/><path d="M14 3v3h-3M6 17v-3h3"/>'),
 };
 
 const HINTS = {
@@ -483,6 +502,7 @@ const HINTS = {
   trustedhosts: "IPv4/IPv6, one IP or CIDR per line. Only these hosts may reach this editor. Empty = nobody, after the next restart.",
   triggers: "One pattern per line. Plain text is a case-insensitive substring; /regex/flags is a JS regex. Hex and control-character escapes are supported in plain patterns for binary probes (see triggers.txt.example). A caller who sends a match in its first bytes is auto-blocked — enable it in the Auto-Block Triggers section. Applies live on save.",
   apihosts: "IPv4/IPv6, one IP or CIDR per line. Source IPs allowed to call the management API. Empty = any IP may call (the API key still applies). Independent of trustedhosts.txt above. Applies live on save.",
+  statushosts: "IPv4/IPv6, one IP or CIDR per line. Source IPs allowed to call the unauthenticated GET /status endpoint (for uptime monitors like Uptime Kuma) — there is no API key on this one, so empty = NOBODY may call it, same fail-closed rule as Trusted Hosts above. Independent of trustedhosts.txt and API Trusted Hosts. Applies live on save.",
 };
 
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"'\`]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "\`": "&#96;" }[c])); }
@@ -590,7 +610,7 @@ function renderSettings() {
 /* ---------- list-file tabs ---------- */
 
 function renderFiles() {
-  for (const name of ["whitelist", "blocklist", "trustedhosts", "triggers", "apihosts"]) {
+  for (const name of ["whitelist", "blocklist", "trustedhosts", "triggers", "apihosts", "statushosts"]) {
     const info = (DATA.files || {})[name] || {};
     $("#ta-" + name).value = info.content || "";
     $("#path-" + name).textContent = info.path ? "(" + info.path + (info.exists ? "" : " - not created yet") + ")" : "";
@@ -598,6 +618,7 @@ function renderFiles() {
   }
   checkTrustedHosts();
   checkApiHosts();
+  checkStatusHosts();
 }
 
 function checkTrustedHosts() {
@@ -611,6 +632,13 @@ function checkApiHosts() {
   const lines = $("#ta-apihosts").value.split(/\\r?\\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
   $("#warn-apihosts").innerHTML = lines.length === 0
     ? '<div class="notice">Empty list: any source IP may call the management API (the API key is still required).</div>'
+    : "";
+}
+
+function checkStatusHosts() {
+  const lines = $("#ta-statushosts").value.split(/\\r?\\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  $("#warn-statushosts").innerHTML = lines.length === 0
+    ? '<div class="notice warn">This list has no entries. Saving it will block every caller from GET /status — there is no API key fallback on this endpoint.</div>'
     : "";
 }
 
@@ -715,6 +743,157 @@ async function runTool(btn, outSel, url, body) {
     document.querySelectorAll("#tab-tools button").forEach((b) => (b.disabled = false));
   }
 }
+
+/* ---------- Updates ---------- */
+
+// Own endpoint (not folded into /api/health) since it calls out to GitHub —
+// a slow/unreachable GitHub should never hold up the rest of the Tools tab.
+async function loadUpdateInfo() {
+  try {
+    const res = await fetch("api/update/check", { headers: { "X-CSRF-Token": CSRF } });
+    if (res.status === 401) { location.href = "login"; return; }
+    if (!res.ok) return;
+    DATA.update = await res.json();
+    renderUpdate();
+  } catch (e) { /* Tools tab just keeps showing its last-known state */ }
+}
+
+function renderUpdate() {
+  const u = DATA.update;
+  const applyBtn = $("#btn-update-apply");
+  const note = $("#update-note");
+  const notesOut = $("#update-notes-out");
+  const backupsWrap = $("#update-backups-wrap");
+  const backupsList = $("#update-backups-list");
+
+  if (!u) {
+    $("#update-kv").innerHTML = "<div><b>Current version</b><span class='muted'>v" +
+      esc((DATA.status || {}).version || "?") + "</span></div>";
+    applyBtn.classList.add("hidden");
+    note.textContent = "";
+    notesOut.classList.add("hidden");
+    backupsWrap.classList.add("hidden");
+    return;
+  }
+
+  $("#update-kv").innerHTML =
+    "<div><b>Current version</b><span class='muted'>v" + esc(u.currentVersion || "?") + "</span></div>" +
+    "<div><b>Latest release</b>" + (u.error
+      ? pill(false, "", "check failed", true)
+      : (u.updateAvailable ? pill(false, "", "v" + esc(u.latestVersion) + " available", true) : pill(true, "up to date", ""))) + "</div>";
+
+  if (u.error) {
+    note.textContent = "Could not check GitHub: " + u.error;
+  } else if (!u.platformSupported) {
+    note.textContent = u.updateAvailable
+      ? "v" + u.latestVersion + " is available, but self-update is only supported on Linux hosts — update this install manually."
+      : "Self-update is only supported on Linux hosts.";
+  } else if (!u.tarAvailable) {
+    note.textContent = 'The "tar" command was not found on this host — self-update needs it.';
+  } else {
+    note.textContent = "";
+  }
+
+  const canApply = !!(u.updateAvailable && !u.error && u.platformSupported && u.tarAvailable);
+  applyBtn.classList.toggle("hidden", !canApply);
+  applyBtn.textContent = "Update to v" + (u.latestVersion || "?");
+
+  if (u.releaseNotes) {
+    notesOut.textContent = u.releaseNotes.trim();
+    notesOut.classList.remove("hidden");
+  } else {
+    notesOut.classList.add("hidden");
+  }
+
+  const backups = u.backups || [];
+  if (backups.length) {
+    backupsWrap.classList.remove("hidden");
+    backupsList.innerHTML = backups.map((name) =>
+      "<div class='row' style='justify-content:space-between'><span class='muted'>" + esc(name) + "</span>" +
+      "<button class='small' data-rollback='" + esc(name) + "'>Roll back to this</button></div>"
+    ).join("");
+  } else {
+    backupsWrap.classList.add("hidden");
+  }
+}
+
+$("#btn-update-check").addEventListener("click", async () => {
+  $("#btn-update-check").disabled = true;
+  await loadUpdateInfo();
+  $("#btn-update-check").disabled = false;
+  if (!DATA.update || DATA.update.error) notice("err", (DATA.update && DATA.update.error) || "Could not check for updates.");
+  else notice("ok", DATA.update.updateAvailable ? "Update available." : "Up to date.");
+});
+
+// Same .modal-bg/.modal pattern (and the same "stay signed in" checkbox) as
+// the restart confirmation below — apply/rollback both restart on success.
+function confirmUpdateModal(title, warning, actionLabel, onGo) {
+  const root = $("#modal-root");
+  root.innerHTML =
+    '<div class="modal-bg"><div class="modal">' +
+    "<h3 style='margin-top:0'>" + esc(title) + "</h3>" +
+    "<p class='muted'>" + esc(warning) + "</p>" +
+    "<label class='row' style='font-weight:400;gap:8px'>" +
+    "<input type='checkbox' id='upd-keep-session' checked style='width:auto'> Stay signed in after restart</label>" +
+    "<div class='row' style='margin-top:18px;justify-content:flex-end'>" +
+    "<button id='upd-cancel'>Cancel</button>" +
+    "<button class='danger' id='upd-go'>" + esc(actionLabel) + "</button></div>" +
+    "</div></div>";
+  $("#upd-cancel").onclick = () => (root.innerHTML = "");
+  $("#upd-go").onclick = () => {
+    const keep = $("#upd-keep-session").checked;
+    root.innerHTML = "";
+    onGo(keep);
+  };
+}
+
+async function runUpdateAction(url, body, workingMsg) {
+  notice("warn", workingMsg);
+  document.querySelectorAll("#tab-tools button").forEach((b) => (b.disabled = true));
+  const r = await api(url, body);
+  const d = r.data || {};
+  if (!(r.ok && d.ok)) {
+    document.querySelectorAll("#tab-tools button").forEach((b) => (b.disabled = false));
+    notice("err", d.error || "Action failed.");
+    await loadUpdateInfo();
+    return;
+  }
+  if (!d.restarting) {
+    document.querySelectorAll("#tab-tools button").forEach((b) => (b.disabled = false));
+    notice("ok", d.message || "Done.");
+    await loadUpdateInfo();
+    return;
+  }
+  if (!d.keepSession) {
+    notice("ok", d.message || "Restarting — you will be signed out.");
+    setTimeout(() => (location.href = "login"), 3000);
+    return;
+  }
+  notice("ok", d.message || "Restarting…");
+  waitForReconnect();
+}
+
+$("#btn-update-apply").addEventListener("click", () => {
+  const u = DATA.update || {};
+  confirmUpdateModal(
+    "Update BBSFirewall to v" + (u.latestVersion || "?") + "?",
+    "Active telnet/SSH connections will drop and the firewall restarts. A backup of the current version is made automatically and restored if anything fails.",
+    "Update now",
+    (keep) => runUpdateAction("api/update/apply", { keepSession: keep }, "Updating…")
+  );
+});
+
+$("#update-backups-list").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-rollback]");
+  if (!btn) return;
+  const name = btn.dataset.rollback;
+  confirmUpdateModal(
+    "Roll back to " + name + "?",
+    "This restores that backup's code, reinstalls its dependencies, and restarts the firewall. Active connections will drop.",
+    "Roll back now",
+    (keep) => runUpdateAction("api/update/rollback", { backup: name, keepSession: keep }, "Rolling back…")
+  );
+});
 
 /* ---------- Performance tab ---------- */
 
@@ -997,6 +1176,7 @@ function collect() {
       trustedhosts: $("#ta-trustedhosts").value,
       triggers: $("#ta-triggers").value,
       apihosts: $("#ta-apihosts").value,
+      statushosts: $("#ta-statushosts").value,
     },
   };
 }
@@ -1039,7 +1219,9 @@ async function load() {
     " · uptime " + st.uptimeHuman +
     " · pm2: " + (st.pm2 ? "available" : "not detected") + " · .env: " + st.envPath;
   updateAddIpButtons();
+  renderUpdate();
   loadHealth(); // don't await — Tools-tab data can arrive after the rest of the page
+  loadUpdateInfo(); // same — hits GitHub, must not hold up the rest of the page
 }
 
 /* ---------- tab switching ---------- */
@@ -1067,6 +1249,7 @@ if (brandHome) {
 document.addEventListener("input", (e) => {
   if (e.target && e.target.id === "ta-trustedhosts") checkTrustedHosts();
   if (e.target && e.target.id === "ta-apihosts") checkApiHosts();
+  if (e.target && e.target.id === "ta-statushosts") checkStatusHosts();
 });
 document.addEventListener("click", (e) => {
   const b = e.target.closest && e.target.closest(".pw-toggle");
@@ -2455,10 +2638,16 @@ function renderSecurityMain() {
     '<h4 style="margin-bottom:6px">Access</h4>' +
     '<div class="row"><button class="small" id="sec-whitelist-me" type="button">Whitelist my IP' +
       (st.ip ? " (" + esc(st.ip) + ")" : "") + "</button></div>" +
+    (st.role === "owner" ?
+      '<hr style="border-color:#26374a;margin:18px 0">' +
+      '<h4 style="margin-bottom:6px">Admin accounts</h4>' +
+      '<div class="row"><button class="small" id="sec-accounts" type="button">Manage admin accounts</button></div>'
+      : "") +
     '<div class="row" style="margin-top:18px;justify-content:flex-end"><button id="sec-close" type="button">Close</button></div>'
   );
 
   $("#sec-close").addEventListener("click", closeModal);
+  if (st.role === "owner") $("#sec-accounts").addEventListener("click", renderAccountsList);
 
   $("#sec-change-pw").addEventListener("click", async () => {
     var cur = $("#sec-cur-pw").value;
@@ -2596,6 +2785,104 @@ function renderMfaDisable() {
       renderSecurityMain();
     } else {
       secNotice((r.data && r.data.error) || "Failed to disable MFA.");
+    }
+  });
+}
+
+/* ---------- Admin accounts (owner only) ---------- */
+
+async function renderAccountsList() {
+  modalOpen(
+    '<h3 style="margin-top:0">Admin accounts</h3>' +
+    '<div id="sec-notice"></div>' +
+    '<div id="accounts-table" class="muted">Loading…</div>' +
+    '<div class="row" style="margin-top:14px"><button class="primary" id="acct-add" type="button">Add admin account</button></div>' +
+    '<div class="row" style="margin-top:18px;justify-content:flex-end"><button id="sec-back" type="button">Back</button></div>'
+  );
+  $("#sec-back").addEventListener("click", renderSecurityMain);
+  $("#acct-add").addEventListener("click", renderAddAccount);
+
+  let r, d;
+  try {
+    r = await fetch("api/security/accounts", { headers: { "X-CSRF-Token": CSRF } });
+    d = await r.json();
+  } catch (e) {
+    $("#accounts-table").innerHTML = '<div class="notice err">' + esc(e.message) + "</div>";
+    return;
+  }
+  if (!r.ok) {
+    $("#accounts-table").innerHTML = '<div class="notice err">' + esc((d && d.error) || "Failed to load accounts.") + "</div>";
+    return;
+  }
+  renderAccountsTable(d.accounts || []);
+}
+
+function accountRow(a) {
+  const isSelf = a.username === DATA.username;
+  return "<tr><td>" + esc(a.username) + (isSelf ? ' <span class="muted">(you)</span>' : "") + "</td><td>" +
+    esc(a.role) + "</td><td>" + (a.mfaEnabled ? pill(true, "on", "") : pill(false, "", "off", true)) +
+    "</td><td>" + esc(fmtDate(a.createdAt)) + "</td><td>" +
+    (isSelf ? "" : '<button class="small danger" data-acct-del="' + esc(a.username) + '" data-acct-role="' + esc(a.role) + '" type="button">Delete</button>') +
+    "</td></tr>";
+}
+
+function renderAccountsTable(accounts) {
+  $("#accounts-table").innerHTML =
+    '<div class="logtable-wrap"><table class="logtable"><thead><tr><th>Username</th><th>Role</th><th>MFA</th><th>Created</th><th></th></tr></thead><tbody>' +
+    accounts.map(accountRow).join("") + "</tbody></table></div>";
+  $("#accounts-table").querySelectorAll("[data-acct-del]").forEach((btn) => {
+    btn.addEventListener("click", () => confirmDeleteAccount(btn.dataset.acctDel, btn.dataset.acctRole));
+  });
+}
+
+function confirmDeleteAccount(username, role) {
+  modalOpen(
+    '<h3 style="margin-top:0">Delete admin account?</h3>' +
+    '<p class="muted">"' + esc(username) + '" (' + esc(role) + ") will lose access immediately, including any active session.</p>" +
+    '<div class="row" style="margin-top:18px;justify-content:flex-end">' +
+    '<button id="acctdel-cancel" type="button">Cancel</button>' +
+    '<button class="danger" id="acctdel-go" type="button">Delete</button></div>'
+  );
+  $("#acctdel-cancel").addEventListener("click", renderAccountsList);
+  $("#acctdel-go").addEventListener("click", async () => {
+    const r = await api("api/security/accounts/delete", { username: username });
+    await renderAccountsList();
+    if (r.ok && r.data && r.data.ok) notice("ok", 'Deleted admin account "' + username + '".');
+    else secNotice((r.data && r.data.error) || "Failed to delete account.");
+  });
+}
+
+function renderAddAccount() {
+  modalOpen(
+    '<h3 style="margin-top:0">Add admin account</h3>' +
+    '<div id="sec-notice"></div>' +
+    '<div class="field"><label for="acct-user">Username</label><input id="acct-user" type="text" autocomplete="off"></div>' +
+    '<div class="field"><label for="acct-pw">Password</label><input id="acct-pw" type="password" autocomplete="new-password"></div>' +
+    '<div class="field"><label for="acct-pw2">Confirm password</label><input id="acct-pw2" type="password" autocomplete="new-password"></div>' +
+    '<div class="field"><label for="acct-role">Role</label><select id="acct-role">' +
+    '<option value="provider">Provider (day-to-day admin access)</option>' +
+    '<option value="owner">Owner (can also manage other admin accounts)</option>' +
+    "</select></div>" +
+    '<div class="row" style="justify-content:flex-end">' +
+    '<button id="sec-back" type="button">Back</button>' +
+    '<button class="primary" id="acct-create" type="button">Create</button>' +
+    "</div>"
+  );
+  $("#sec-back").addEventListener("click", renderAccountsList);
+  $("#acct-create").addEventListener("click", async () => {
+    const username = $("#acct-user").value.trim();
+    const pw1 = $("#acct-pw").value;
+    const pw2 = $("#acct-pw2").value;
+    const role = $("#acct-role").value;
+    if (!username) { secNotice("Username cannot be empty."); return; }
+    if (pw1 !== pw2) { secNotice("Passwords do not match."); return; }
+    if (pw1.length < 8) { secNotice("Password must be at least 8 characters."); return; }
+    const r = await api("api/security/accounts/create", { username: username, password: pw1, role: role });
+    if (r.ok && r.data && r.data.ok) {
+      notice("ok", 'Admin account "' + username + '" created.');
+      await renderAccountsList();
+    } else {
+      secNotice((r.data && r.data.error) || "Failed to create account.");
     }
   });
 }

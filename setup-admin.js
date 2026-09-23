@@ -114,19 +114,16 @@ async function main() {
     process.exit(1);
   }
 
-  const secrets = {
-    version: 1,
-    username,
-    password: security.hashPassword(password),
-    mfa: { enabled: false, secret: null, pendingSecret: null, confirmedAt: null },
-    backupCodes: [],
-  };
-  security.writeSecrets(secrets);
+  // Wipes any existing store and starts over with exactly one 'owner'
+  // account - additional admins (role 'provider') are added afterward from
+  // Security Settings > Admin Accounts in the web editor, not here.
+  security.resetToSingleAccount(username, password);
 
   rl.close();
-  console.log(`\nAdmin account "${username}" saved to ${security.STORE_PATH} (mode 600).`);
+  console.log(`\nAdmin account "${username}" (owner) saved to ${security.STORE_PATH} (mode 600).`);
   console.log('Restart BBSFirewall (or pm2 restart) so the config editor picks it up.');
-  console.log('You can enable MFA afterward from Security Settings in the web editor.');
+  console.log('You can enable MFA, and add more admin accounts, afterward from Security');
+  console.log('Settings in the web editor.');
 }
 
 main().catch((err) => {

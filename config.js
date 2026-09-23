@@ -161,6 +161,16 @@ const config = {
     trustedHostsPath: process.env.API_TRUSTEDHOSTS_PATH || './api-trustedhosts.txt',
   },
 
+  // Unauthenticated GET /status for uptime monitors (e.g. Uptime Kuma), on the
+  // editor's own HTTPS listener under /status. No API key, no session — gated
+  // ONLY by STATUS_TRUSTEDHOSTS_PATH, which is fail-CLOSED like trustedhosts.txt
+  // (empty/missing = nobody), unlike api-trustedhosts.txt's fail-open default —
+  // there is no key here to fall back on. Needs configEditor.enabled (no
+  // listener of its own).
+  status: {
+    trustedHostsPath: process.env.STATUS_TRUSTEDHOSTS_PATH || './status-trustedhosts.txt',
+  },
+
   // Console logging level: debug, info, warn, error
   logLevel: process.env.LOG_LEVEL || 'info',
 

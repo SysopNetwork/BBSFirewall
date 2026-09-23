@@ -98,6 +98,34 @@ pm2 list                        # status
 
 ---
 
+## 🔄 Updating
+
+```bash
+node update.js --check     # see if a newer release exists — changes nothing
+node update.js             # check, confirm, download, apply, then offer to restart
+node update.js --yes       # skip the "apply this update?" confirmation (still asks about restart)
+node update.js --rollback  # list backups made by previous updates
+node update.js --rollback pre-update-1.3.7-2026-09-22T12-00-00-000Z   # restore one
+```
+
+Every update backs up the current install first, downloads the tagged GitHub release,
+overlays it, reinstalls dependencies, and re-validates your `.env` before restarting —
+if anything in that chain fails, it automatically restores the pre-update backup so the
+old version keeps running instead of a broken one. Your `.env` and list files (whitelist,
+blocklist, trusted hosts, triggers) are never touched by an update.
+
+The same thing is available from the web editor's **Tools** tab (an "Update now" button
+next to GeoIP/SSH key/certs), and over the [Management API](API.md)
+(`GET /api/update/check`, `POST /api/update/apply`, `POST /api/update/rollback`).
+
+Self-update is **Linux-only** (it shells out to `tar` and `pm2`) — on another OS, or a
+host missing `tar`, the check still works so you can see whether an update exists, but
+applying one is refused; update that install manually (`git pull` or re-download +
+`npm install`) instead. It also never runs on a schedule — always an explicit command or
+button click.
+
+---
+
 ## ⚙️ Configuration
 
 All settings live in `.env`. Copy `.env.example` to get started — every option is documented there.
@@ -431,7 +459,7 @@ from Security Settings, under your username in the top-right of the header.
 
 - **Settings** — the whole `.env`, grouped into collapsible sections with per-field help and a *more* toggle for longer explanations (e.g. SSH terminate vs passthrough).
 - **Lists** — the **Whitelist / Blocklist / Trusted Hosts / Triggers / API Trusted Hosts** editors, labeled by name, not filename, with "Add my IP" / "/24" / "/29" quick-add buttons on Whitelist and Blocklist.
-- **Tools** — one-click **download / update** of the MaxMind GeoIP database (needs `MAXMIND_LICENSE_KEY` saved), **generate an SSH host key** for terminate mode, and **issue a Let's Encrypt certificate** for the editor or the port-443 redirect (installs certbot if missing; console output shown on success or failure).
+- **Tools** — one-click **download / update** of the MaxMind GeoIP database (needs `MAXMIND_LICENSE_KEY` saved), **generate an SSH host key** for terminate mode, **issue a Let's Encrypt certificate** for the editor or the port-443 redirect (installs certbot if missing; console output shown on success or failure), and **check for / apply updates** (see [Updating](#-updating) — Linux-only, restarts on success, automatic rollback on failure).
 - **System Stats** — live CPU %, load average, memory, process RSS, disk, bandwidth (current/avg/peak), BBSFirewall folder and log-file disk usage, per-interface network throughput, and firewall counters (active connections, accepted/rejected, blocklist size, temp-blocked IPs). Auto-refreshes every 4s.
 - **Logs** — browse the per-proxy rotated log files written by `file-logger.js` (`LOG_FILE_ENABLED`, on by default — see Retention below). Files are grouped by proxy type, with anything older than 30 days automatically folded into per-month sections so a long-running board's log list stays readable instead of scrolling forever. View a file's content (large files are tailed to the last 512 KB) or permanently delete one.
 - **Security Settings** — under your username in the header: change your password, enable/disable MFA (TOTP QR code + one-time backup codes), regenerate backup codes, and whitelist your own IP.
@@ -478,6 +506,9 @@ The key is compared in constant time and never logged; 5 bad keys from one IP lo
 | `POST /api/geoip` | Download/update the MaxMind database (`{"action":"download"\|"update"}`) |
 | `POST /api/sshkey` | Generate the SSH host key (`{"type":"rsa"\|"ed25519","overwrite":false}`) |
 | `POST /api/cert` | Issue a Let's Encrypt certificate (`{"target":"editor"\|"redirect"}`) |
+| `GET /api/update/check` | Check GitHub for a newer release |
+| `POST /api/update/apply` | Download and apply an update, then restart (`{}` or `{"tag":"v1.4.0"}`) |
+| `POST /api/update/rollback` | Restore a previous update backup, then restart (`{"backup":"pre-update-…"}`) |
 
 ```bash
 curl -s https://your-host:8443/api/stats -H "Authorization: Bearer $API_KEY"
@@ -488,6 +519,36 @@ curl -s https://your-host:8443/api/save -H "Authorization: Bearer $API_KEY" \
 ```
 
 > The API has the **same power as the admin UI** — including rewriting `.env` (its own `API_KEY`, the editor password, everything). A changed `API_KEY` or any `.env` mode change applies on the next restart, not immediately.
+
+---
+
+## 📈 Status Endpoint (uptime monitoring)
+
+A lightweight `GET /status` on the config editor's HTTPS port, for monitoring tools like [Uptime Kuma](https://github.com/louislam/uptime-kuma) that just need a quick liveness check — no API key, no login. Requires `CONFIG_EDITOR_ENABLED=true` (it shares that listener; no port of its own).
+
+```bash
+curl -s https://your-host:8443/status
+```
+
+```json
+{
+  "ok": true,
+  "version": "1.4.0",
+  "uptimeSec": 86412,
+  "listeners": { "telnet": true, "ssh": true, "webRedirect": true, "configEditor": true }
+}
+```
+
+`ok` reflects the telnet listener specifically (the app's core job); `listeners` gives a per-service breakdown if your monitor supports a JSON-path check (Uptime Kuma's "HTTP(s) - Json Query" monitor type, checking `$.ok == true`, for example). Values are read from the actual running servers, not just from `.env` flags, so a bind failure shows up as down.
+
+Since there's **no key or session to fall back on**, `status-trustedhosts.txt` is **fail-closed** like `trustedhosts.txt` — an empty or missing file blocks *everyone*, including you. Add your monitoring host's IP before relying on this:
+
+```
+# status-trustedhosts.txt
+203.0.113.10        # your Uptime Kuma server
+```
+
+Edit it live from the **Lists** tab ("Status Endpoint Trusted Hosts") or `STATUS_TRUSTEDHOSTS_PATH` in `.env`.
 
 ---
 

@@ -1,0 +1,26 @@
+# BBSFirewall - Status endpoint IP allowlist
+#
+# Source IPs / CIDRs allowed to call GET /status (the unauthenticated uptime-
+# monitor endpoint on the config editor's HTTPS port, e.g. for Uptime Kuma).
+# There is no API key or login on this endpoint — this file is the ONLY gate.
+#
+# One IP or CIDR per line. IPv4 and IPv6 both work. Lines starting with # are
+# comments; an inline # comment after an entry is also allowed.
+#
+# IMPORTANT: unlike api-trustedhosts.txt, an EMPTY or MISSING file here DOES
+# lock everyone out — same fail-closed behavior as trustedhosts.txt. There is
+# no key to fall back on, so add your monitoring host's IP before relying on
+# this endpoint.
+#
+# Examples:
+#   203.0.113.10           the Uptime Kuma server
+#   198.51.100.0/24        a hosting range
+#   2001:db8:abcd::/48     an IPv6 range
+#
+# To use this file:
+# 1. Copy to status-trustedhosts.txt
+# 2. Add the IP(s) your uptime monitor polls from
+# 3. Set STATUS_TRUSTEDHOSTS_PATH=./status-trustedhosts.txt in your .env (this is the default)
+
+# 203.0.113.10
+# 198.51.100.0/24

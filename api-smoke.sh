@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
 # BBSFirewall Management API smoke test.
-# Exercises auth, the read endpoints (config, logs), a no-op save (safe — only
-# writes a .env backup), and the plain-HTTP->HTTPS redirect. Fails loudly if
-# anything is off.
+# Exercises auth, the read endpoints (config, logs, update check), a no-op
+# save (safe — only writes a .env backup), and the plain-HTTP->HTTPS redirect.
+# Fails loudly if anything is off. Deliberately does NOT exercise
+# /api/update/apply or /api/update/rollback — those mutate the running code,
+# unlike everything else this script checks.
 #
 #   API=https://admin.example.com:8443 KEY='your-API_KEY' bash api-smoke.sh
 #
@@ -22,6 +24,7 @@ echo -n "auth: X-API-Key header ............ "; [ "$(code -H "X-API-Key: $KEY" "
 echo -n "read: /api/config ................. "; [ "$(code -H "Authorization: Bearer $KEY" "$API/api/config")" = 200 ] && echo OK || { echo FAIL; exit 1; }
 echo -n "read: /api/health .................. "; [ "$(code -H "Authorization: Bearer $KEY" "$API/api/health")" = 200 ] && echo OK || { echo FAIL; exit 1; }
 echo -n "read: /api/logs .................... "; [ "$(code -H "Authorization: Bearer $KEY" "$API/api/logs")" = 200 ] && echo OK || { echo FAIL; exit 1; }
+echo -n "read: /api/update/check ............ "; [ "$(code -H "Authorization: Bearer $KEY" "$API/api/update/check")" = 200 ] && echo OK || { echo FAIL; exit 1; }
 
 ver=$("${CURL[@]}" -H "Authorization: Bearer $KEY" "$API/api/stats" \
       | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).host.version))')

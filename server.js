@@ -121,8 +121,9 @@ class BBSFirewall {
     // Start web redirect server if enabled
     startWebRedirectServer();
 
-    // Start the web config editor if enabled
-    startConfigEditorServer();
+    // Start the web config editor if enabled. Passes `this` so the /status
+    // endpoint can report real telnet/SSH listener state, not just config flags.
+    startConfigEditorServer(this);
 
     this.setupGracefulShutdown();
   }

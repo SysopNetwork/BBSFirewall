@@ -189,4 +189,10 @@ function stopWebRedirectServer() {
   });
 }
 
-module.exports = { startWebRedirectServer, stopWebRedirectServer };
+// Real listening state (not just "configured on") — used by the /status
+// endpoint (config-editor.js) so a bind failure (bad cert, EADDRINUSE) shows
+// up as down rather than reporting whatever .env says should be true.
+function isHttpUp() { return !!(httpServer && httpServer.listening); }
+function isHttpsUp() { return !!(httpsServer && httpsServer.listening); }
+
+module.exports = { startWebRedirectServer, stopWebRedirectServer, isHttpUp, isHttpsUp };

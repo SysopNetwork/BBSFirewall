@@ -14,21 +14,43 @@
  * the trust boundary this script relies on - the same boundary that already
  * lets that account read/rewrite .env, every IP list, and the SSH host key.
  *
- *   node disable-mfa.js --yes
+ * With more than one admin account configured, pass --user to say which one
+ * (a bare run just lists the usernames rather than guessing).
+ *
+ *   node disable-mfa.js --yes [--user <username>]
  *
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
 const security = require('./security');
 
-const YES = process.argv.slice(2).includes('--yes');
+const args = process.argv.slice(2);
+const YES = args.includes('--yes');
+const userFlagIdx = args.indexOf('--user');
+const requestedUser = userFlagIdx !== -1 ? args[userFlagIdx + 1] : null;
 
 console.log('=== BBSFirewall - Emergency MFA Disable ===\n');
 
-const secrets = security.readSecrets();
-if (!secrets) {
+const accounts = security.listAccounts();
+if (!accounts.length) {
   console.log(`No admin account found (${security.STORE_PATH} is missing or unreadable).`);
   console.log('Nothing to disable. Run setup-admin.js first if you need to create one.');
+  process.exit(1);
+}
+
+let secrets;
+if (requestedUser) {
+  secrets = accounts.find((a) => a.username === requestedUser);
+  if (!secrets) {
+    console.log(`No admin account named "${requestedUser}". Configured accounts: ` +
+      accounts.map((a) => a.username).join(', '));
+    process.exit(1);
+  }
+} else if (accounts.length === 1) {
+  secrets = accounts[0];
+} else {
+  console.log('More than one admin account is configured - re-run with --user to say which one:');
+  for (const a of accounts) console.log(`  ${a.username} (${a.role}, MFA ${a.mfa.enabled ? 'enabled' : 'off'})`);
   process.exit(1);
 }
 

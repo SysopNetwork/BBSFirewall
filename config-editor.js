@@ -39,6 +39,8 @@ const trustedhosts = require('./trustedhosts');
 const views = require('./config-editor-ui');
 const metrics = require('./metrics');
 const security = require('./security');
+const updater = require('./updater');
+const webRedirect = require('./web-redirect');
 
 const log = logger.getLogger('config-editor');
 
@@ -72,6 +74,7 @@ let sweepTimer = null;
 let lastCpuSample = null;   // for CPU-% deltas
 let lastNetSample = null;   // for network throughput deltas
 let proxyHeaderWarned = false;
+let firewallInstance = null; // set by startConfigEditorServer(firewall) — see /status handler
 
 const sessions = new Map();   // token -> { username, ip, created, lastSeen, csrf, mfaVerified }
 const loginFails = new Map(); // ip  -> { count, until } — browser login
@@ -574,12 +577,27 @@ function cookieHeader(token, maxAgeSec) {
 // gate below then restricts this session to the MFA-verify/logout routes
 // until it passes) and true otherwise, so the gate is a no-op when MFA is
 // off.
-function createSession(username, ip, mfaVerified) {
+//
+// `role` ('owner'/'provider') is captured once here, the same "decided at
+// login, never re-checked" pattern mfaVerified already uses above - the only
+// way it can go stale is the account being deleted out from under the
+// session, and handleDeleteAccount revokes that account's sessions directly.
+function createSession(username, ip, mfaVerified, role) {
   const token = crypto.randomBytes(32).toString('hex');
   const csrf = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
-  sessions.set(token, { username, ip, created: now, lastSeen: now, csrf, mfaVerified: !!mfaVerified });
+  sessions.set(token, { username, ip, created: now, lastSeen: now, csrf, mfaVerified: !!mfaVerified, role: role || 'owner' });
   return { token, csrf };
+}
+
+// Signs out every OTHER session belonging to `username` (own account only -
+// NOT a global sign-everyone-out, now that more than one admin account can
+// exist). Pass `exceptToken: null` to revoke every session for that user,
+// including their own (used when deleting an account outright).
+function revokeOtherSessionsForUser(username, exceptToken) {
+  for (const [token, s] of sessions) {
+    if (token !== exceptToken && s.username === username) sessions.delete(token);
+  }
 }
 
 function getSession(req) {
@@ -843,7 +861,7 @@ async function buildHealth() {
 // lives behind the separate /api/health endpoint so a slow probe never delays
 // the Settings sections or the header version — see buildHealth().
 async function buildConfigPayload(session) {
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   const envPath = path.resolve(config.configEditor.envPath);
   let envText = '';
   try { envText = fs.readFileSync(envPath, 'utf-8'); } catch (_) {}
@@ -877,6 +895,7 @@ async function buildConfigPayload(session) {
     ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
     ['triggers', config.triggerBlock.listPath || './triggers.txt'],
     ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
+    ['statushosts', config.status.trustedHostsPath || './status-trustedhosts.txt'],
   ]) {
     const r = readFileSafe(p);
     files[name] = { path: p, content: r.content, exists: r.exists };
@@ -894,6 +913,7 @@ async function buildConfigPayload(session) {
       pm2: await hasPm2(),
       envPath,
       ip: session.ip,
+      role: session.role || 'owner',
       mfaEnabled: !!(secrets && secrets.mfa && secrets.mfa.enabled),
       backupCodesRemaining: secrets ? secrets.backupCodes.filter((c) => !c.usedAt).length : 0,
     },
@@ -977,6 +997,16 @@ async function doSave(req, res, session) {
     if (check.invalid.length) {
       return sendJson(res, 400, {
         error: 'api-trustedhosts.txt has unparseable lines: ' + check.invalid.slice(0, 5).join(', '),
+      });
+    }
+  }
+
+  // Same check for the /status endpoint's IP allowlist (same file format).
+  if (typeof filesInput.statushosts === 'string') {
+    const check = trustedhosts.validateText(filesInput.statushosts);
+    if (check.invalid.length) {
+      return sendJson(res, 400, {
+        error: 'status-trustedhosts.txt has unparseable lines: ' + check.invalid.slice(0, 5).join(', '),
       });
     }
   }
@@ -1082,6 +1112,7 @@ async function doSave(req, res, session) {
     ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
     ['triggers', config.triggerBlock.listPath || './triggers.txt'],
     ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
+    ['statushosts', config.status.trustedHostsPath || './status-trustedhosts.txt'],
   ]) {
     if (typeof filesInput[name] !== 'string') continue;
     try {
@@ -1100,6 +1131,8 @@ async function doSave(req, res, session) {
   loadedTrustedHosts = trustedhosts.loadTrustedHosts(config.configEditor.trustedHostsPath);
   // Same for the API IP allowlist.
   loadedApiHosts = trustedhosts.loadTrustedHosts(config.api.trustedHostsPath);
+  // Same for the /status endpoint's IP allowlist.
+  loadedStatusHosts = trustedhosts.loadTrustedHosts(config.status.trustedHostsPath);
 
   // Reload the ipfilter list files that changed, so edits apply without a restart.
   try {
@@ -1132,7 +1165,7 @@ function persistSessions() {
     const out = [];
     for (const [token, s] of sessions) {
       out.push({ token, username: s.username, ip: s.ip, created: s.created, lastSeen: s.lastSeen, csrf: s.csrf,
-        mfaVerified: !!s.mfaVerified });
+        mfaVerified: !!s.mfaVerified, role: s.role });
     }
     fs.writeFileSync(SESSION_STORE, JSON.stringify({ savedAt: Date.now(), sessions: out }), { mode: 0o600 });
     return out.length;
@@ -1172,6 +1205,9 @@ function loadPersistedSessions() {
       // login, so it should not re-challenge for MFA. Defaults to false (the
       // safer state) for an older persisted session that predates this field.
       mfaVerified: !!s.mfaVerified,
+      // Defaults to 'owner' for a session persisted before roles existed -
+      // matches normalizeAccount()'s same default for a pre-role account.
+      role: security.ROLES.includes(s.role) ? s.role : 'owner',
     });
     restored++;
   }
@@ -1438,6 +1474,136 @@ async function handleCert(req, res, session) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// /api/update/* — self-update via updater.js (see its header for the full
+// backup -> download -> overlay -> npm install -> validateConfig() ->
+// restart, with an automatic rollback on any failure).
+// ---------------------------------------------------------------------------
+const UPDATE_CACHE_TTL_MS = 60 * 1000; // GitHub's unauthenticated API is rate-limited to 60 req/hr
+let updateCheckCache = null; // { at, value }
+
+function invalidateUpdateCache() { updateCheckCache = null; }
+
+async function handleUpdateCheck(req, res) {
+  if (updateCheckCache && Date.now() - updateCheckCache.at < UPDATE_CACHE_TTL_MS) {
+    return sendJson(res, 200, updateCheckCache.value);
+  }
+  const info = await updater.checkForUpdate(__dirname);
+  const value = {
+    ...info,
+    platformSupported: !updater.checkPlatform(),
+    tarAvailable: await updater.hasTar(),
+    backups: updater.listBackups(__dirname),
+  };
+  updateCheckCache = { at: Date.now(), value };
+  sendJson(res, info.error ? 502 : 200, value);
+}
+
+// Fire the pm2 restart after the HTTP response has flushed — same pattern
+// and same session carry-over as handleRestart, since a successful update
+// always needs a restart to actually run the new code.
+function restartAfterUpdate(req, keepSession) {
+  const name = config.configEditor.pm2AppName || 'bbsfirewall';
+  if (keepSession) {
+    persistSessions();
+  } else {
+    try { fs.unlinkSync(SESSION_STORE); } catch (_) {}
+    destroySession(req);
+  }
+  setTimeout(() => {
+    execFile('pm2', ['restart', name, '--update-env'], { timeout: 20000 }, (err) => {
+      if (err) {
+        log.error(`pm2 restart after update failed: ${err.message}`);
+        release('update'); // let the admin try again; the code was already updated on disk
+      }
+    });
+  }, 750);
+}
+
+async function handleUpdateApply(req, res, session) {
+  if (!acquire(res, 'update')) return;
+  let tag;
+  let keepSession = true;
+  try {
+    const b = JSON.parse(await readBody(req) || '{}');
+    if (b && typeof b.tag === 'string') tag = b.tag;
+    if (b && b.keepSession === false) keepSession = false;
+  } catch (_) {}
+
+  log.warn(`Update ${tag ? `to "${sanitizeForLog(tag)}" ` : ''}requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  const result = await updater.applyUpdate({ tag, appDir: __dirname });
+  invalidateUpdateCache();
+
+  if (!result.ok) {
+    release('update');
+    return sendJson(res, 400, result);
+  }
+
+  if (!(await updater.hasPm2())) {
+    release('update');
+    return sendJson(res, 200, {
+      ...result,
+      restarting: false,
+      message: `Updated to v${result.newVersion}. pm2 was not found on this host — restart BBSFirewall manually to run the new version.`,
+    });
+  }
+
+  // Lock stays held: the process is about to exit, which clears it anyway.
+  sendJson(res, 200, {
+    ...result,
+    restarting: true,
+    keepSession,
+    message: keepSession
+      ? `Updated to v${result.newVersion}. Restarting — the page reconnects on its own in a few seconds.`
+      : `Updated to v${result.newVersion}. Restarting — you will be signed out; sign in again in a few seconds.`,
+  });
+  restartAfterUpdate(req, keepSession);
+}
+
+async function handleUpdateRollback(req, res, session) {
+  if (!acquire(res, 'update')) return;
+  let backup;
+  let keepSession = true;
+  try {
+    const b = JSON.parse(await readBody(req) || '{}');
+    backup = b && b.backup;
+    if (b && b.keepSession === false) keepSession = false;
+  } catch (_) {}
+
+  if (!backup) {
+    release('update');
+    return sendJson(res, 400, { error: 'Missing "backup" name.' });
+  }
+
+  log.warn(`Rollback to "${sanitizeForLog(backup)}" requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  const result = await updater.rollbackToBackup(backup, __dirname);
+  invalidateUpdateCache();
+
+  if (!result.ok) {
+    release('update');
+    return sendJson(res, 400, result);
+  }
+
+  if (!(await updater.hasPm2())) {
+    release('update');
+    return sendJson(res, 200, {
+      ...result,
+      restarting: false,
+      message: `Restored v${result.newVersion}. pm2 was not found on this host — restart BBSFirewall manually to run it.`,
+    });
+  }
+
+  sendJson(res, 200, {
+    ...result,
+    restarting: true,
+    keepSession,
+    message: keepSession
+      ? `Restored v${result.newVersion}. Restarting — the page reconnects on its own in a few seconds.`
+      : `Restored v${result.newVersion}. Restarting — you will be signed out; sign in again in a few seconds.`,
+  });
+  restartAfterUpdate(req, keepSession);
+}
+
 // Hot-swap the editor's own TLS certificate without a restart.
 function reloadEditorCert() {
   if (!server || typeof server.setSecureContext !== 'function') return false;
@@ -1669,14 +1835,15 @@ async function handleLoginPost(req, res, ip) {
   const username = form.get('username') || '';
   const password = form.get('password') || '';
 
-  const secrets = security.readSecrets();
-  const cfgUser = secrets ? secrets.username : '';
+  // With more than one possible account, the exact-match lookup by username
+  // IS the username check - there's no separate "cfgUser" to compare against
+  // anymore. Still always runs real scrypt work against SOME record (the
+  // account's own, or the dummy) so response time doesn't reveal whether the
+  // username exists.
+  const secrets = security.readSecrets(username);
   const passRecord = secrets ? secrets.password : DUMMY_PASSWORD_RECORD;
-  // Both checks always run (neither is short-circuited by the other) so
-  // response time does not reveal whether the username alone was correct.
-  const userOk = safeEqual(username, cfgUser);
   const passOk = security.verifyPassword(password, passRecord);
-  const ok = !!secrets && userOk && passOk;
+  const ok = !!secrets && passOk;
   if (!ok) {
     recordLoginFail(ip);
     log.blocked(`Failed config editor login for "${sanitizeForLog(username)}" from ${ip}`);
@@ -1685,7 +1852,7 @@ async function handleLoginPost(req, res, ip) {
 
   loginFails.delete(ip);
   const mfaEnabled = !!(secrets.mfa && secrets.mfa.enabled);
-  const { token } = createSession(username, ip, !mfaEnabled);
+  const { token } = createSession(username, ip, !mfaEnabled, secrets.role);
   const maxAge = Math.floor(ABSOLUTE_SESSION_MS / 1000);
   res.writeHead(302, {
     Location: '/',
@@ -1719,7 +1886,7 @@ async function handleMfaVerifyLogin(req, res, session, ip) {
   let body;
   try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
 
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   if (!secrets || !secrets.mfa || !secrets.mfa.enabled || !secrets.mfa.secret) {
     // Shouldn't normally be reachable (mfaVerified starts true when MFA is
     // off), but fail closed rather than silently accepting anything.
@@ -1752,7 +1919,7 @@ async function handleChangePassword(req, res, session) {
   const current = String(body.currentPassword || '');
   const next = String(body.newPassword || '');
 
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
   if (!security.verifyPassword(current, secrets.password)) {
     release('security');
@@ -1767,10 +1934,9 @@ async function handleChangePassword(req, res, session) {
   security.writeSecrets(secrets);
 
   // An attacker holding a stolen session cookie should not survive a
-  // password change — drop every OTHER session, keep the caller's own.
-  for (const token of [...sessions.keys()]) {
-    if (token !== session.token) sessions.delete(token);
-  }
+  // password change — drop every OTHER session for THIS account (other
+  // admins' sessions are unaffected).
+  revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
   log.info(`Password changed by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
@@ -1779,7 +1945,7 @@ async function handleChangePassword(req, res, session) {
 
 async function handleMfaSetup(req, res, session) {
   if (!acquire(res, 'security')) return;
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
 
   const pendingSecret = security.generateTotpSecret();
@@ -1799,7 +1965,7 @@ async function handleMfaConfirm(req, res, session) {
   let body;
   try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
 
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   if (!secrets || !secrets.mfa.pendingSecret) {
     release('security');
     return sendJson(res, 400, { error: 'No MFA setup in progress — start from "Enable MFA" again.' });
@@ -1821,10 +1987,8 @@ async function handleMfaConfirm(req, res, session) {
   // re-checked against the account's current MFA state — so a session opened
   // before MFA was enabled (e.g. a leaked/stolen cookie) would otherwise keep
   // full access forever with the new second factor never enforced against
-  // it. Same reasoning as handleChangePassword's revoke-the-rest below.
-  for (const token of [...sessions.keys()]) {
-    if (token !== session.token) sessions.delete(token);
-  }
+  // it. Same reasoning as handleChangePassword's revoke-the-rest above.
+  revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
   log.info(`MFA enabled by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
@@ -1838,7 +2002,7 @@ async function handleMfaDisable(req, res, session) {
   let body;
   try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
 
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
   if (!security.verifyPassword(String(body.currentPassword || ''), secrets.password)) {
     release('security');
@@ -1862,9 +2026,7 @@ async function handleMfaDisable(req, res, session) {
 
   // Security-posture change — same revoke-the-rest policy as password change
   // and MFA enable, above.
-  for (const token of [...sessions.keys()]) {
-    if (token !== session.token) sessions.delete(token);
-  }
+  revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
   log.warn(`MFA disabled by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
@@ -1876,7 +2038,7 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
   let body;
   try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
 
-  const secrets = security.readSecrets();
+  const secrets = security.readSecrets(session.username);
   if (!secrets || !secrets.mfa.enabled) {
     release('security');
     return sendJson(res, 400, { error: 'MFA is not enabled on this account.' });
@@ -1891,13 +2053,86 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
   security.writeSecrets(secrets);
 
   // Security-posture change — same revoke-the-rest policy as above.
-  for (const token of [...sessions.keys()]) {
-    if (token !== session.token) sessions.delete(token);
-  }
+  revokeOtherSessionsForUser(session.username, session.token);
 
   release('security');
   log.info(`Backup codes regenerated by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true, backupCodes });
+}
+
+// ---------------------------------------------------------------------------
+// /api/security/accounts* — owner-only admin-account management (v1.4,
+// [[roadmap-hosted-platform]] item 4). A 'provider' account manages only its
+// OWN password/MFA above; only 'owner' can see, add, or remove OTHER admin
+// accounts. Browser session lane only, same as the rest of /api/security/*.
+// ---------------------------------------------------------------------------
+function requireOwner(res, session) {
+  if (session.role === 'owner') return true;
+  sendJson(res, 403, { error: 'Only an owner account can manage admin accounts.' });
+  return false;
+}
+
+function accountSummary(a) {
+  return { username: a.username, role: a.role, createdAt: a.createdAt, mfaEnabled: !!(a.mfa && a.mfa.enabled) };
+}
+
+async function handleListAccounts(req, res, session) {
+  if (!requireOwner(res, session)) return;
+  return sendJson(res, 200, { accounts: security.listAccounts().map(accountSummary) });
+}
+
+async function handleCreateAccount(req, res, session) {
+  if (!requireOwner(res, session)) return;
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+
+  let account;
+  try {
+    account = security.createAccount(String(body.username || ''), String(body.password || ''), String(body.role || 'provider'));
+  } catch (err) {
+    release('security');
+    return sendJson(res, 400, { error: err.message });
+  }
+
+  release('security');
+  log.info(`Admin account "${sanitizeForLog(account.username)}" (${account.role}) created by ` +
+    `"${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true, account: accountSummary(account) });
+}
+
+async function handleDeleteAccount(req, res, session) {
+  if (!requireOwner(res, session)) return;
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  const username = String(body.username || '');
+
+  if (username === session.username) {
+    release('security');
+    return sendJson(res, 400, { error: 'You cannot delete your own account while signed in as it — have another owner remove it.' });
+  }
+  const accounts = security.listAccounts();
+  const target = accounts.find((a) => a.username === username);
+  if (target && target.role === 'owner' && accounts.filter((a) => a.role === 'owner').length <= 1) {
+    release('security');
+    return sendJson(res, 400, { error: 'Cannot delete the only remaining owner account.' });
+  }
+
+  try {
+    security.deleteAccount(username);
+  } catch (err) {
+    release('security');
+    return sendJson(res, 400, { error: err.message });
+  }
+
+  // The deleted account may have an active session right now — kick it
+  // immediately rather than waiting for it to time out on its own.
+  revokeOtherSessionsForUser(username, null);
+
+  release('security');
+  log.warn(`Admin account "${sanitizeForLog(username)}" deleted by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true });
 }
 
 // Appends `line` to the file at `absPath` if it is not already present as an
@@ -2024,6 +2259,15 @@ async function handleApiRequest(req, res, ip, presentedKey) {
   if (pathname === '/api/cert' && method === 'POST') {
     return handleCert(req, res, session);
   }
+  if (pathname === '/api/update/check' && method === 'GET') {
+    return handleUpdateCheck(req, res);
+  }
+  if (pathname === '/api/update/apply' && method === 'POST') {
+    return handleUpdateApply(req, res, session);
+  }
+  if (pathname === '/api/update/rollback' && method === 'POST') {
+    return handleUpdateRollback(req, res, session);
+  }
   if (pathname === '/api/logs' && method === 'GET') {
     return handleLogsList(res);
   }
@@ -2041,9 +2285,59 @@ async function handleApiRequest(req, res, ip, presentedKey) {
 // ---------------------------------------------------------------------------
 let loadedTrustedHosts = null;
 let loadedApiHosts = null;
+let loadedStatusHosts = null;
+
+// ---------------------------------------------------------------------------
+// GET /status — unauthenticated (no session, no CSRF, no API key), gated only
+// by status-trustedhosts.txt. For uptime monitors (e.g. Uptime Kuma) that
+// shouldn't need to manage an API key or admin-UI access just to poll
+// liveness. `ok` reflects the telnet listener specifically — the app's core
+// job — while `listeners` gives a per-service breakdown for a more detailed
+// JSON-query check. Real listener state (not config-flag guessing): `.server`/
+// `.sshServer`/`.sshPassthroughServer` come from the BBSFirewall instance
+// handed to startConfigEditorServer(); the web redirect's state comes from
+// web-redirect.js's own isHttpUp()/isHttpsUp() (its servers are module-private
+// there, not exposed any other way).
+// ---------------------------------------------------------------------------
+function buildStatusPayload() {
+  const f = firewallInstance;
+  const telnetUp = !!(f && f.server && f.server.listening);
+  const sshUp = !!(f && (
+    (f.sshServer && f.sshServer.listening) ||
+    (f.sshPassthroughServer && f.sshPassthroughServer.listening)
+  ));
+  return {
+    ok: telnetUp,
+    version: appVersion(),
+    uptimeSec: Math.floor(process.uptime()),
+    listeners: {
+      telnet: telnetUp,
+      ssh: sshUp,
+      webRedirect: webRedirect.isHttpUp() || webRedirect.isHttpsUp(),
+      configEditor: true, // answering this request is proof it's up
+    },
+  };
+}
+
+function handleStatusEndpoint(req, res, ip) {
+  if (!trustedhosts.isTrusted(ip, loadedStatusHosts)) {
+    log.blocked(`Status endpoint: rejected untrusted host ${ip}`);
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    return res.end('Forbidden');
+  }
+  sendJson(res, 200, buildStatusPayload());
+}
 
 async function onRequest(req, res) {
   const ip = clientIp(req);
+
+  // Status lane: checked first, before the Management API key lane and the
+  // browser trusted-host gate below — so GET /status behaves identically
+  // whether or not a caller happens to send an Authorization header, and
+  // status-trustedhosts.txt is the only thing that gates it.
+  if (req.method === 'GET' && req.url.split('?')[0] === '/status') {
+    return handleStatusEndpoint(req, res, ip);
+  }
 
   // The trusted-host gate keys off the real socket peer. If a proxy/load
   // balancer is in front, every request appears to come from that one IP and
@@ -2179,11 +2473,29 @@ async function onRequest(req, res) {
     if (pathname === '/api/security/whitelist-me' && method === 'POST') {
       return handleWhitelistMe(req, res, session);
     }
+    if (pathname === '/api/security/accounts' && method === 'GET') {
+      return handleListAccounts(req, res, session);
+    }
+    if (pathname === '/api/security/accounts/create' && method === 'POST') {
+      return handleCreateAccount(req, res, session);
+    }
+    if (pathname === '/api/security/accounts/delete' && method === 'POST') {
+      return handleDeleteAccount(req, res, session);
+    }
     if (pathname === '/api/sshkey' && method === 'POST') {
       return handleSshKey(req, res, session);
     }
     if (pathname === '/api/cert' && method === 'POST') {
       return handleCert(req, res, session);
+    }
+    if (pathname === '/api/update/check' && method === 'GET') {
+      return handleUpdateCheck(req, res);
+    }
+    if (pathname === '/api/update/apply' && method === 'POST') {
+      return handleUpdateApply(req, res, session);
+    }
+    if (pathname === '/api/update/rollback' && method === 'POST') {
+      return handleUpdateRollback(req, res, session);
     }
     if (pathname === '/api/logs' && method === 'GET') {
       return handleLogsList(res);
@@ -2210,8 +2522,9 @@ async function onRequest(req, res) {
 // ---------------------------------------------------------------------------
 // lifecycle
 // ---------------------------------------------------------------------------
-function startConfigEditorServer() {
+function startConfigEditorServer(firewall) {
   const ce = config.configEditor;
+  firewallInstance = firewall || null;
   if (!ce.enabled) {
     log.info('Config editor is disabled');
     return;
@@ -2241,6 +2554,17 @@ function startConfigEditorServer() {
       : 'no source-IP restriction'}`);
   } else {
     log.info('Management API is disabled');
+  }
+
+  loadedStatusHosts = trustedhosts.loadTrustedHosts(config.status.trustedHostsPath);
+  if (loadedStatusHosts.invalid.length) {
+    log.warn(`Status endpoint: ${loadedStatusHosts.invalid.length} unparseable status-trustedhosts line(s) ignored`);
+  }
+  if (loadedStatusHosts.entries.length === 0) {
+    log.warn(`Status endpoint: trusted hosts list is empty (${path.resolve(config.status.trustedHostsPath)}) — ` +
+      'GET /status will reject every request until at least one entry is added');
+  } else {
+    log.info(`Status endpoint: ${loadedStatusHosts.entries.length} trusted host entr(y/ies) loaded`);
   }
 
   const restored = loadPersistedSessions();

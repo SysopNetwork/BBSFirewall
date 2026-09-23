@@ -8,6 +8,17 @@
  * circular require. No new npm dependency - TOTP (RFC 6238) and base32 are
  * both implemented on Node's built-in crypto.
  *
+ * The store holds an ARRAY of admin accounts (`{accounts:[...]}`), each with
+ * its own password hash, MFA secret/backup codes, and a coarse `role`
+ * ('owner' or 'provider') - see [[roadmap-hosted-platform]] item 4 / v1.4.
+ * A pre-multi-admin store is a single account object (`{username,password,...}`
+ * with no `accounts` array); `loadStore()` migrates it to `{accounts:[that
+ * account, role:'owner']}` on first read and persists the migration, so an
+ * upgrader's existing login keeps working with no manual step. Most call
+ * sites are unaffected by the migration: `readSecrets(username)` still
+ * returns one account-shaped object and `writeSecrets(account)` still writes
+ * one back - only the on-disk envelope around it changed.
+ *
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
@@ -59,20 +70,60 @@ function randomIndex(maxExclusive) {
 // ---------------------------------------------------------------------------
 // store read/write
 // ---------------------------------------------------------------------------
+const ROLES = ['owner', 'provider'];
+
 function secretsExist() {
   return fs.existsSync(STORE_PATH);
 }
 
-function readSecrets() {
+// Fills in defaults for fields that may be missing on an older/hand-edited
+// account record. `role` defaults to 'owner' for any account predating roles
+// (v1 single-account stores, and the v2 migration below) - the safe choice,
+// since that account previously had full, unrestricted access.
+function normalizeAccount(a) {
+  if (!a || !a.username || !a.password) return null;
+  if (!a.mfa) a.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
+  if (!Array.isArray(a.backupCodes)) a.backupCodes = [];
+  if (!ROLES.includes(a.role)) a.role = 'owner';
+  if (!Number.isFinite(a.createdAt)) a.createdAt = Date.now();
+  return a;
+}
+
+// Reads the raw store and migrates a pre-v2 (single-account) file in place.
+// Returns null only when the file is missing/unreadable/empty - never for a
+// store with zero accounts (deleteAccount refuses to ever produce one).
+function loadStore() {
+  let raw;
   try {
-    const data = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
-    if (!data || typeof data !== 'object' || !data.password) return null;
-    if (!data.mfa) data.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
-    if (!Array.isArray(data.backupCodes)) data.backupCodes = [];
-    return data;
+    raw = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
   } catch (_) {
     return null;
   }
+  if (!raw || typeof raw !== 'object') return null;
+
+  if (Array.isArray(raw.accounts)) {
+    raw.accounts = raw.accounts.map(normalizeAccount).filter(Boolean);
+    return raw;
+  }
+
+  // v1 shape: the store WAS a single account. Wrap it and persist the
+  // migration immediately so every later read/write already sees v2 - this
+  // function's return value must stay accurate for the deleteAccount
+  // "never leave zero accounts" guarantee to hold.
+  if (raw.password) {
+    const migrated = { accounts: [normalizeAccount({
+      username: raw.username,
+      password: raw.password,
+      mfa: raw.mfa,
+      backupCodes: raw.backupCodes,
+      role: 'owner',
+      createdAt: raw.updatedAt || Date.now(),
+    })] };
+    writeStore(migrated);
+    return migrated;
+  }
+
+  return null;
 }
 
 function pruneBackups() {
@@ -90,9 +141,9 @@ function pruneBackups() {
 
 // Backs up the existing store (if any) before overwriting, mirrors the
 // backup-then-write-then-chmod pattern config-editor.js uses for .env.
-function writeSecrets(data) {
-  data.updatedAt = Date.now();
-  const text = JSON.stringify(data, null, 2);
+function writeStore(store) {
+  store.updatedAt = Date.now();
+  const text = JSON.stringify(store, null, 2);
   if (fs.existsSync(STORE_PATH)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const backupPath = `${STORE_PATH}.bak.${stamp}`;
@@ -104,6 +155,75 @@ function writeSecrets(data) {
   fs.writeFileSync(STORE_PATH, text, { mode: FILE_MODE });
   chmodQuiet(STORE_PATH, FILE_MODE); // mode: only applies on create; enforce on overwrite too
   pruneBackups();
+}
+
+// ---------------------------------------------------------------------------
+// account access - most of config-editor.js's call sites only ever deal with
+// ONE account at a time (whichever is in the caller's session), so
+// readSecrets()/writeSecrets() keep their pre-multi-admin, single-account
+// shape; only the account-management endpoints need the full list.
+// ---------------------------------------------------------------------------
+function listAccounts() {
+  const store = loadStore();
+  return store ? store.accounts : [];
+}
+
+function readSecrets(username) {
+  const store = loadStore();
+  if (!store) return null;
+  return store.accounts.find((a) => a.username === username) || null;
+}
+
+// `account` must carry its own (unchanged) `.username` - looks up the
+// matching entry in the CURRENT on-disk store (not a stale copy) and
+// replaces it, so a concurrent write to a different account is never lost.
+function writeSecrets(account) {
+  const store = loadStore() || { accounts: [] };
+  const idx = store.accounts.findIndex((a) => a.username === account.username);
+  if (idx === -1) store.accounts.push(account);
+  else store.accounts[idx] = account;
+  writeStore(store);
+}
+
+// setup-admin.js only: wipes the ENTIRE store and replaces it with one fresh
+// owner account. Deliberately separate from writeSecrets (which only ever
+// touches one account within the existing store) - --reset means "start
+// over", not "add another account".
+function resetToSingleAccount(username, password) {
+  writeStore({ accounts: [normalizeAccount({
+    username, password: hashPassword(password), role: 'owner', createdAt: Date.now(),
+  })] });
+}
+
+// Both throw a plain Error with a user-facing message on failure - callers
+// (the owner-only /api/security/accounts/* handlers) catch and relay it.
+function createAccount(username, password, role) {
+  username = String(username || '').trim();
+  if (!username) throw new Error('Username cannot be empty.');
+  if (String(password || '').length < 8) throw new Error('Password must be at least 8 characters.');
+  if (!ROLES.includes(role)) throw new Error('Role must be "owner" or "provider".');
+
+  const store = loadStore() || { accounts: [] };
+  if (store.accounts.some((a) => a.username.toLowerCase() === username.toLowerCase())) {
+    throw new Error('An account with that username already exists.');
+  }
+  const account = normalizeAccount({ username, password: hashPassword(password), role, createdAt: Date.now() });
+  store.accounts.push(account);
+  writeStore(store);
+  return account;
+}
+
+// Refuses to ever leave the store with zero accounts - callers layer their
+// own rules on top (config-editor.js additionally refuses to delete the
+// caller's own account, or the last remaining 'owner').
+function deleteAccount(username) {
+  const store = loadStore();
+  if (!store) throw new Error('No admin accounts configured.');
+  const idx = store.accounts.findIndex((a) => a.username === username);
+  if (idx === -1) throw new Error('No such account.');
+  if (store.accounts.length <= 1) throw new Error('Cannot delete the only remaining admin account.');
+  store.accounts.splice(idx, 1);
+  writeStore(store);
 }
 
 // ---------------------------------------------------------------------------
@@ -273,9 +393,14 @@ function verifyAndConsumeBackupCode(secrets, code) {
 
 module.exports = {
   STORE_PATH,
+  ROLES,
   secretsExist,
+  listAccounts,
   readSecrets,
   writeSecrets,
+  resetToSingleAccount,
+  createAccount,
+  deleteAccount,
   hashPassword,
   verifyPassword,
   generateTotpSecret,
