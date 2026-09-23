@@ -265,6 +265,9 @@ const ENV_SCHEMA = [
 ];
 
 const SCHEMA_KEYS = new Set(ENV_SCHEMA.flatMap((s) => s.fields.map((f) => f.key)));
+// key -> field def, for doSave's "blank means keep the current secret" handling
+// and buildConfigPayload's redaction below.
+const SCHEMA_FIELDS = new Map(ENV_SCHEMA.flatMap((s) => s.fields.map((f) => [f.key, f])));
 
 // ---------------------------------------------------------------------------
 // .env parsing / writing
@@ -946,6 +949,8 @@ async function buildConfigPayload(session) {
     icon: sec.icon || null,
     fields: sec.fields.map((f) => {
       const active = Object.prototype.hasOwnProperty.call(parsed.active, f.key);
+      const rawValue = active ? parsed.active[f.key] : (f.required ? (parsed.commented[f.key] || f.def || '') : '');
+      const isSecret = f.type === 'secret';
       return {
         key: f.key,
         type: f.type,
@@ -955,7 +960,16 @@ async function buildConfigPayload(session) {
         required: !!f.required,
         options: f.options || null,
         enabled: f.required ? true : active,
-        value: active ? parsed.active[f.key] : (f.required ? (parsed.commented[f.key] || f.def || '') : ''),
+        // A secret's actual value never reaches the browser, for ANY
+        // session (this used to send it in plaintext to every authenticated
+        // role, including firewall_admin, even though the Management API
+        // key it can hold has full admin power and bypasses MFA entirely -
+        // found in review 2026-09-23). Write-only from here on, same as the
+        // admin password itself: doSave() below treats a blank submission as
+        // "leave the current key alone," not "clear it." hasValue tells the
+        // UI whether one is already set, without revealing what it is.
+        value: isSecret ? '' : rawValue,
+        hasValue: isSecret ? !!rawValue : undefined,
         placeholder: !active ? (parsed.commented[f.key] || f.def || '') : '',
       };
     }),
@@ -1040,12 +1054,32 @@ async function doSave(req, res, session) {
   const envInput = (payload && payload.env) || {};
   const filesInput = (payload && payload.files) || {};
 
+  const envPath = path.resolve(config.configEditor.envPath);
+  const dir = path.dirname(envPath);
+  const base = path.basename(envPath);
+
+  let originalText = '';
+  try { originalText = fs.readFileSync(envPath, 'utf-8'); }
+  catch (err) {
+    if (err.code !== 'ENOENT') return sendJson(res, 500, { error: 'Cannot read .env: ' + err.message });
+  }
+  const currentParsed = parseEnvText(originalText);
+
   // Build the update map from submitted schema fields only.
   const updates = {};
   for (const [key, entry] of Object.entries(envInput)) {
     if (!SCHEMA_KEYS.has(key)) continue;
     if (typeof entry !== 'object' || entry === null) continue;
-    const value = entry.value == null ? '' : String(entry.value);
+    let value = entry.value == null ? '' : String(entry.value);
+    // A secret field's real value is never sent to the browser (see
+    // buildConfigPayload) — the UI always submits it back empty unless the
+    // admin actually typed a new one. Blank here means "leave the current
+    // key alone," not "clear it," same as leaving a password field blank —
+    // substitute the value already on disk instead of overwriting it with
+    // empty. To genuinely clear one, disable the field or hand-edit .env.
+    if (value === '' && (SCHEMA_FIELDS.get(key) || {}).type === 'secret') {
+      value = currentParsed.active[key] || '';
+    }
     if (/[\r\n]/.test(value)) return sendJson(res, 400, { error: `${key} must not contain a newline` });
     const enabled = entry.required ? true : entry.enabled !== false;
     updates[key] = { value, enabled };
@@ -1100,16 +1134,6 @@ async function doSave(req, res, session) {
           tv.slow.slice(0, 3).join(', '),
       });
     }
-  }
-
-  const envPath = path.resolve(config.configEditor.envPath);
-  const dir = path.dirname(envPath);
-  const base = path.basename(envPath);
-
-  let originalText = '';
-  try { originalText = fs.readFileSync(envPath, 'utf-8'); }
-  catch (err) {
-    if (err.code !== 'ENOENT') return sendJson(res, 500, { error: 'Cannot read .env: ' + err.message });
   }
 
   let newText;

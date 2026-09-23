@@ -28,6 +28,30 @@ entry — see the git history for changes before v1.3.5.
 - **Light theme**, alongside the existing dark theme. A toggle in the header
   switches instantly and remembers your choice; the login and MFA screens pick
   up the saved (or OS-preferred) theme automatically.
+- **Reset another admin's password** (Global Admin, Manage Admin Accounts):
+  sets a new password on another account without needing its old one. Any
+  active session on that account is signed out immediately.
+
+### 🔐 Security
+
+- **The Management API key and MaxMind license key are no longer sent to the
+  browser in plaintext.** `GET /api/config` used to include their real values
+  for every authenticated session regardless of role — a Firewall Admin
+  account (or anyone who saw their screen or captured their traffic) could
+  read a credential that grants full, MFA-free control over the firewall.
+  These fields are now write-only, the same way the admin password itself
+  already worked: leave the field blank on Save to keep the current key,
+  type a new one to replace it.
+- The Management API lane's read-only endpoints (`/api/config`, `/api/health`,
+  `/api/stats`, `/api/update/check`, `/api/logs`, `/api/logs/view`) are no
+  longer silent on success — each now logs who read what, so a valid key
+  being used to pull config/health/stats/logs leaves an audit trail (visible
+  once file-log verbosity is raised to `info`).
+- Password change, admin account creation, MFA enable, backup-code
+  regeneration, MFA-required policy changes, and log-file deletion are now
+  captured under the *default* file-log verbosity — previously only
+  password-reset, account-delete, and MFA-disable were, so half of the
+  account/credential lifecycle went unlogged unless verbosity was raised.
 
 ### 🐛 Fixes
 

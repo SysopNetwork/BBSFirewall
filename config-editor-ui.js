@@ -748,8 +748,14 @@ function fieldControl(f) {
       "</select>";
   }
   if (f.type === "secret") {
-    return '<div class="pw-wrap"><input id="' + id + '" data-key="' + f.key + '" type="password" value="' +
-      esc(val) + '"' + ph + '><button type="button" class="pw-toggle">show</button></div>';
+    // The server never sends a secret's actual value (see buildConfigPayload's
+    // redaction) - val is always "". hasValue only says whether one exists,
+    // so the placeholder communicates state without revealing anything: leave
+    // this blank on Save to keep whatever is already there, or type a new
+    // value to replace it.
+    const secretPh = f.hasValue ? "unchanged - leave blank to keep the current key" : "not set";
+    return '<div class="pw-wrap"><input id="' + id + '" data-key="' + f.key + '" type="password" value=""' +
+      ' placeholder="' + esc(secretPh) + '"><button type="button" class="pw-toggle">show</button></div>';
   }
   const inputType = (f.type === "port" || f.type === "int") ? "number" : "text";
   return '<input id="' + id + '" data-key="' + f.key + '" type="' + inputType + '" value="' + esc(val) + '"' + ph + ">";
