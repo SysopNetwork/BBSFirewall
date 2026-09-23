@@ -272,6 +272,105 @@ codeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); 
 </html>`;
 }
 
+// Forced MFA enrollment (v1.4): served instead of appPage() when
+// session.mfaSetupRequired is true (see onRequest's gate) — a master_admin
+// marked this account's `mfaRequired` policy on, and it hasn't set up MFA
+// yet. Deliberately simpler than the full Security Settings enrollment flow
+// (no QR code — that library is vendored directly into appPage()'s own
+// script below, and duplicating ~300 lines of it into a second standalone
+// page isn't worth the risk given this file's own backslash-doubling
+// GOTCHA): shows the manual secret and an otpauth:// link instead, which
+// every authenticator app also supports.
+function mfaSetupRequiredPage(opts = {}) {
+  const csrf = htmlEscape(opts.csrf || '');
+  const nonce = htmlEscape(opts.nonce || '');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBSFirewall - Config Editor</title>
+<link rel="icon" href="/favicon.ico">
+<style>${BASE_CSS}</style>
+</head>
+<body>
+<div class="wrap" style="max-width:460px;margin-top:6vh">
+  <div class="brand"><img class="logo" src="/assets/logo.svg" alt="BBSFirewall"><span class="tag">config editor</span></div>
+  <div class="card">
+    <div id="notice"></div>
+    <h3 style="margin-top:0">Two-factor authentication required</h3>
+    <p class="muted">An administrator has required MFA on this account. Set it up now to continue — you cannot use the config editor until this is done.</p>
+    <div id="setup-step">
+      <p class="muted">Loading…</p>
+    </div>
+  </div>
+  <p class="statline">This session is restricted to trusted hosts.</p>
+  <p class="footer-credit">Created with love <span class="heart">&#10084;&#65039;</span> by Mark Laudenbach in Iowa, USA.<br>
+    <a href="https://github.com/SysopNetwork/BBSFirewall" target="_blank" rel="noopener noreferrer">github.com/SysopNetwork/BBSFirewall</a></p>
+</div>
+<script nonce="${nonce}">
+const CSRF = "${csrf}";
+const stepEl = document.getElementById("setup-step");
+const noticeEl = document.getElementById("notice");
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function showError(msg) { noticeEl.innerHTML = '<div class="notice err">' + esc(msg) + '</div>'; }
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": CSRF },
+    body: JSON.stringify(body || {}),
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  return { ok: res.ok, status: res.status, data };
+}
+function renderCodeStep(secret, otpauthUrl) {
+  stepEl.innerHTML =
+    '<div class="field"><label>Secret (enter into your authenticator app)</label>' +
+    '<div class="kv"><div><span class="muted" style="word-break:break-all">' + esc(secret) + '</span></div></div></div>' +
+    '<p class="muted"><a href="' + esc(otpauthUrl) + '">Open in authenticator app</a> (works on the same device).</p>' +
+    '<div class="field"><label for="setup-code">6-digit code</label>' +
+    '<input id="setup-code" type="text" inputmode="numeric" autocomplete="one-time-code" autofocus></div>' +
+    '<button class="primary" id="setup-confirm" type="button" style="width:100%">Verify &amp; continue</button>';
+  const codeInput = document.getElementById("setup-code");
+  let busy = false;
+  async function confirm() {
+    if (busy) return;
+    const code = codeInput.value.trim();
+    if (!code) return;
+    busy = true;
+    const r = await post("api/security/mfa/confirm", { code: code });
+    if (r.ok && r.data && r.data.ok) { renderBackupCodes(r.data.backupCodes); return; }
+    if (r.status === 401 && r.data && r.data.error === "MFA setup is required before continuing.") { location.href = "login"; return; }
+    showError((r.data && r.data.error) || "Invalid code.");
+    codeInput.value = "";
+    codeInput.focus();
+    busy = false;
+  }
+  document.getElementById("setup-confirm").addEventListener("click", confirm);
+  codeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") confirm(); });
+}
+function renderBackupCodes(codes) {
+  stepEl.innerHTML =
+    '<p class="muted">MFA is now enabled. Save these backup codes somewhere safe — each works once, and this is the only time they will be shown.</p>' +
+    '<div class="backup-codes">' + codes.map((c) => "<div>" + esc(c) + "</div>").join("") + "</div>" +
+    '<label class="toggle-row" style="margin-top:14px"><input type="checkbox" id="codes-ack"> I have saved these codes</label>' +
+    '<button class="primary" id="codes-done" type="button" style="width:100%;margin-top:12px" disabled>Continue</button>';
+  document.getElementById("codes-ack").addEventListener("change", (e) => { document.getElementById("codes-done").disabled = !e.target.checked; });
+  document.getElementById("codes-done").addEventListener("click", () => { location.href = "/"; });
+}
+(async function start() {
+  const r = await post("api/security/mfa/setup", {});
+  if (r.ok && r.data && r.data.ok) { renderCodeStep(r.data.secret, r.data.otpauthUrl); return; }
+  if (r.status === 401) { location.href = "login"; return; }
+  stepEl.innerHTML = "";
+  showError((r.data && r.data.error) || "Could not start MFA setup.");
+})();
+</script>
+</body>
+</html>`;
+}
+
 function appPage(opts = {}) {
   const csrf = htmlEscape(opts.csrf || '');
   const user = htmlEscape(opts.username || '');
@@ -2638,7 +2737,7 @@ function renderSecurityMain() {
     '<h4 style="margin-bottom:6px">Access</h4>' +
     '<div class="row"><button class="small" id="sec-whitelist-me" type="button">Whitelist my IP' +
       (st.ip ? " (" + esc(st.ip) + ")" : "") + "</button></div>" +
-    (st.role === "owner" ?
+    (st.role === "master_admin" ?
       '<hr style="border-color:#26374a;margin:18px 0">' +
       '<h4 style="margin-bottom:6px">Admin accounts</h4>' +
       '<div class="row"><button class="small" id="sec-accounts" type="button">Manage admin accounts</button></div>'
@@ -2647,14 +2746,14 @@ function renderSecurityMain() {
   );
 
   $("#sec-close").addEventListener("click", closeModal);
-  if (st.role === "owner") $("#sec-accounts").addEventListener("click", renderAccountsList);
+  if (st.role === "master_admin") $("#sec-accounts").addEventListener("click", renderAccountsList);
 
   $("#sec-change-pw").addEventListener("click", async () => {
     var cur = $("#sec-cur-pw").value;
     var n1 = $("#sec-new-pw").value;
     var n2 = $("#sec-new-pw2").value;
     if (n1 !== n2) { secNotice("New passwords do not match."); return; }
-    if (n1.length < 8) { secNotice("New password must be at least 8 characters."); return; }
+    if (n1.length < 12) { secNotice("New password must be at least 12 characters."); return; }
     var r = await api("api/security/change-password", { currentPassword: cur, newPassword: n1 });
     if (r.ok && r.data && r.data.ok) {
       secNotice("Password changed. Other signed-in sessions have been signed out.", "ok");
@@ -2817,10 +2916,16 @@ async function renderAccountsList() {
   renderAccountsTable(d.accounts || []);
 }
 
+const ROLE_LABELS = { master_admin: "Provider / Master Admin", firewall_admin: "Firewall Admin" };
+function roleLabel(role) { return ROLE_LABELS[role] || role; }
+
 function accountRow(a) {
   const isSelf = a.username === DATA.username;
   return "<tr><td>" + esc(a.username) + (isSelf ? ' <span class="muted">(you)</span>' : "") + "</td><td>" +
-    esc(a.role) + "</td><td>" + (a.mfaEnabled ? pill(true, "on", "") : pill(false, "", "off", true)) +
+    esc(roleLabel(a.role)) + "</td><td>" + (a.mfaEnabled ? pill(true, "on", "") : pill(false, "", "off", true)) +
+    "</td><td>" +
+    '<button class="small" data-acct-mfareq="' + esc(a.username) + '" data-acct-mfareq-next="' + (a.mfaRequired ? "0" : "1") + '" type="button">' +
+    (a.mfaRequired ? "Required" : "Optional") + "</button>" +
     "</td><td>" + esc(fmtDate(a.createdAt)) + "</td><td>" +
     (isSelf ? "" : '<button class="small danger" data-acct-del="' + esc(a.username) + '" data-acct-role="' + esc(a.role) + '" type="button">Delete</button>') +
     "</td></tr>";
@@ -2828,17 +2933,32 @@ function accountRow(a) {
 
 function renderAccountsTable(accounts) {
   $("#accounts-table").innerHTML =
-    '<div class="logtable-wrap"><table class="logtable"><thead><tr><th>Username</th><th>Role</th><th>MFA</th><th>Created</th><th></th></tr></thead><tbody>' +
+    '<div class="logtable-wrap"><table class="logtable"><thead><tr><th>Username</th><th>Role</th><th>MFA</th><th>MFA policy</th><th>Created</th><th></th></tr></thead><tbody>' +
     accounts.map(accountRow).join("") + "</tbody></table></div>";
   $("#accounts-table").querySelectorAll("[data-acct-del]").forEach((btn) => {
     btn.addEventListener("click", () => confirmDeleteAccount(btn.dataset.acctDel, btn.dataset.acctRole));
+  });
+  $("#accounts-table").querySelectorAll("[data-acct-mfareq]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const username = btn.dataset.acctMfareq;
+      const required = btn.dataset.acctMfareqNext === "1";
+      btn.disabled = true;
+      const r = await api("api/security/accounts/set-mfa-required", { username: username, required: required });
+      if (r.ok && r.data && r.data.ok) {
+        notice("ok", 'MFA policy for "' + username + '" set to ' + (required ? "required" : "optional") + ".");
+        await renderAccountsList();
+      } else {
+        btn.disabled = false;
+        secNotice((r.data && r.data.error) || "Failed to update MFA policy.");
+      }
+    });
   });
 }
 
 function confirmDeleteAccount(username, role) {
   modalOpen(
     '<h3 style="margin-top:0">Delete admin account?</h3>' +
-    '<p class="muted">"' + esc(username) + '" (' + esc(role) + ") will lose access immediately, including any active session.</p>" +
+    '<p class="muted">"' + esc(username) + '" (' + esc(roleLabel(role)) + ") will lose access immediately, including any active session.</p>" +
     '<div class="row" style="margin-top:18px;justify-content:flex-end">' +
     '<button id="acctdel-cancel" type="button">Cancel</button>' +
     '<button class="danger" id="acctdel-go" type="button">Delete</button></div>'
@@ -2860,9 +2980,10 @@ function renderAddAccount() {
     '<div class="field"><label for="acct-pw">Password</label><input id="acct-pw" type="password" autocomplete="new-password"></div>' +
     '<div class="field"><label for="acct-pw2">Confirm password</label><input id="acct-pw2" type="password" autocomplete="new-password"></div>' +
     '<div class="field"><label for="acct-role">Role</label><select id="acct-role">' +
-    '<option value="provider">Provider (day-to-day admin access)</option>' +
-    '<option value="owner">Owner (can also manage other admin accounts)</option>' +
+    '<option value="firewall_admin">Firewall Admin (day-to-day admin access)</option>' +
+    '<option value="master_admin">Provider / Master Admin (can also manage other admin accounts)</option>' +
     "</select></div>" +
+    '<label class="toggle-row"><input type="checkbox" id="acct-mfa-required"> Require MFA on this account</label>' +
     '<div class="row" style="justify-content:flex-end">' +
     '<button id="sec-back" type="button">Back</button>' +
     '<button class="primary" id="acct-create" type="button">Create</button>' +
@@ -2874,10 +2995,11 @@ function renderAddAccount() {
     const pw1 = $("#acct-pw").value;
     const pw2 = $("#acct-pw2").value;
     const role = $("#acct-role").value;
+    const mfaRequired = $("#acct-mfa-required").checked;
     if (!username) { secNotice("Username cannot be empty."); return; }
     if (pw1 !== pw2) { secNotice("Passwords do not match."); return; }
-    if (pw1.length < 8) { secNotice("Password must be at least 8 characters."); return; }
-    const r = await api("api/security/accounts/create", { username: username, password: pw1, role: role });
+    if (pw1.length < 12) { secNotice("Password must be at least 12 characters."); return; }
+    const r = await api("api/security/accounts/create", { username: username, password: pw1, role: role, mfaRequired: mfaRequired });
     if (r.ok && r.data && r.data.ok) {
       notice("ok", 'Admin account "' + username + '" created.');
       await renderAccountsList();
@@ -2893,4 +3015,4 @@ load().catch((e) => notice("err", "Failed to load: " + e.message));
 </html>`;
 }
 
-module.exports = { loginPage, mfaPage, appPage, htmlEscape };
+module.exports = { loginPage, mfaPage, mfaSetupRequiredPage, appPage, htmlEscape };

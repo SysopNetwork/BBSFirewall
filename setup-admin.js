@@ -96,9 +96,10 @@ async function main() {
 
   if (!password) {
     for (;;) {
-      const p1 = await ask('Admin password (min 8 characters): ');
-      if (p1.length < 8) {
-        console.log('Too short - minimum 8 characters.');
+      const p1 = await ask(`Admin password (min ${security.MIN_PASSWORD_LENGTH} characters): `);
+      const pwErr = security.passwordError(p1);
+      if (pwErr) {
+        console.log(pwErr);
         continue;
       }
       const p2 = await ask('Confirm password: ');
@@ -109,18 +110,21 @@ async function main() {
       password = p1;
       break;
     }
-  } else if (password.length < 8) {
-    console.log('The imported .env password is shorter than 8 characters and cannot be used.');
-    process.exit(1);
+  } else {
+    const pwErr = security.passwordError(password);
+    if (pwErr) {
+      console.log(`The imported .env password does not meet the current password policy: ${pwErr}`);
+      process.exit(1);
+    }
   }
 
-  // Wipes any existing store and starts over with exactly one 'owner'
-  // account - additional admins (role 'provider') are added afterward from
-  // Security Settings > Admin Accounts in the web editor, not here.
+  // Wipes any existing store and starts over with exactly one 'master_admin'
+  // account - additional admins (role 'firewall_admin') are added afterward
+  // from Security Settings > Admin Accounts in the web editor, not here.
   security.resetToSingleAccount(username, password);
 
   rl.close();
-  console.log(`\nAdmin account "${username}" (owner) saved to ${security.STORE_PATH} (mode 600).`);
+  console.log(`\nAdmin account "${username}" (Provider / Master Admin) saved to ${security.STORE_PATH} (mode 600).`);
   console.log('Restart BBSFirewall (or pm2 restart) so the config editor picks it up.');
   console.log('You can enable MFA, and add more admin accounts, afterward from Security');
   console.log('Settings in the web editor.');

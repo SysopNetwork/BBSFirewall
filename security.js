@@ -9,11 +9,12 @@
  * both implemented on Node's built-in crypto.
  *
  * The store holds an ARRAY of admin accounts (`{accounts:[...]}`), each with
- * its own password hash, MFA secret/backup codes, and a coarse `role`
- * ('owner' or 'provider') - see [[roadmap-hosted-platform]] item 4 / v1.4.
- * A pre-multi-admin store is a single account object (`{username,password,...}`
- * with no `accounts` array); `loadStore()` migrates it to `{accounts:[that
- * account, role:'owner']}` on first read and persists the migration, so an
+ * its own password hash, MFA secret/backup codes, a coarse `role`
+ * ('master_admin' or 'firewall_admin'), and an `mfaRequired` policy flag -
+ * see [[roadmap-hosted-platform]] item 4 / v1.4. A pre-multi-admin store is a
+ * single account object (`{username,password,...}` with no `accounts`
+ * array); `loadStore()` migrates it to `{accounts:[that account,
+ * role:'master_admin']}` on first read and persists the migration, so an
  * upgrader's existing login keeps working with no manual step. Most call
  * sites are unaffected by the migration: `readSecrets(username)` still
  * returns one account-shaped object and `writeSecrets(account)` still writes
@@ -70,21 +71,32 @@ function randomIndex(maxExclusive) {
 // ---------------------------------------------------------------------------
 // store read/write
 // ---------------------------------------------------------------------------
-const ROLES = ['owner', 'provider'];
+// 'master_admin' = full access, incl. managing other admin accounts ("Provider
+// / Master Admin" in the UI). 'firewall_admin' = day-to-day access to this
+// one firewall only ("Firewall Admin" in the UI). Renamed from the original
+// 'owner'/'provider' pair (v1.4) - LEGACY_ROLES below maps an already-stored
+// old value forward so existing accounts don't need a manual fix-up.
+const ROLES = ['master_admin', 'firewall_admin'];
+const LEGACY_ROLES = { owner: 'master_admin', provider: 'firewall_admin' };
 
 function secretsExist() {
   return fs.existsSync(STORE_PATH);
 }
 
 // Fills in defaults for fields that may be missing on an older/hand-edited
-// account record. `role` defaults to 'owner' for any account predating roles
-// (v1 single-account stores, and the v2 migration below) - the safe choice,
-// since that account previously had full, unrestricted access.
+// account record. `role` defaults to 'master_admin' for any account
+// predating roles entirely (v1 single-account stores, and the v2 migration
+// below) - the safe choice, since that account previously had full,
+// unrestricted access.
 function normalizeAccount(a) {
   if (!a || !a.username || !a.password) return null;
   if (!a.mfa) a.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
   if (!Array.isArray(a.backupCodes)) a.backupCodes = [];
-  if (!ROLES.includes(a.role)) a.role = 'owner';
+  if (LEGACY_ROLES[a.role]) a.role = LEGACY_ROLES[a.role];
+  if (!ROLES.includes(a.role)) a.role = 'master_admin';
+  // Per-account MFA policy (v1.4): defaults to false (optional, the original
+  // behavior) for any account predating this field.
+  if (typeof a.mfaRequired !== 'boolean') a.mfaRequired = false;
   if (!Number.isFinite(a.createdAt)) a.createdAt = Date.now();
   return a;
 }
@@ -102,7 +114,16 @@ function loadStore() {
   if (!raw || typeof raw !== 'object') return null;
 
   if (Array.isArray(raw.accounts)) {
-    raw.accounts = raw.accounts.map(normalizeAccount).filter(Boolean);
+    const before = raw.accounts.map((a) => a && a.role);
+    const normalized = raw.accounts.map(normalizeAccount);
+    // Persist a legacy role rename (or any other normalizeAccount fix-up)
+    // immediately, same reasoning as the v1-to-v2 store migration below -
+    // otherwise every read keeps remapping 'owner'/'provider' in memory
+    // without the on-disk file ever catching up. Compared before filtering
+    // out any malformed (null) entries, so indices still line up.
+    const changed = normalized.some((a, i) => a && a.role !== before[i]);
+    raw.accounts = normalized.filter(Boolean);
+    if (changed) writeStore(raw);
     return raw;
   }
 
@@ -116,7 +137,7 @@ function loadStore() {
       password: raw.password,
       mfa: raw.mfa,
       backupCodes: raw.backupCodes,
-      role: 'owner',
+      role: 'master_admin',
       createdAt: raw.updatedAt || Date.now(),
     })] };
     writeStore(migrated);
@@ -126,15 +147,36 @@ function loadStore() {
   return null;
 }
 
+// Timestamped backups live in their own ADMINBACKUPS/ folder next to
+// .admin-security.json, same pattern as config-editor.js's ENVBACKUPS/ for
+// .env - keeps the app directory from accumulating dozens of loose
+// `.admin-security.json.bak.*` files alongside the real store.
+const BACKUP_DIRNAME = 'ADMINBACKUPS';
+const BACKUP_DIR = path.join(path.dirname(STORE_PATH), BACKUP_DIRNAME);
+
 function pruneBackups() {
   try {
-    const dir = __dirname;
     const base = path.basename(STORE_PATH);
-    const backups = fs.readdirSync(dir)
+    const backups = fs.readdirSync(BACKUP_DIR)
       .filter((n) => n.startsWith(base + '.bak.'))
       .sort();
     while (backups.length > BACKUPS_KEPT) {
-      fs.unlinkSync(path.join(dir, backups.shift()));
+      fs.unlinkSync(path.join(BACKUP_DIR, backups.shift()));
+    }
+  } catch (_) { /* best effort */ }
+}
+
+// One-time cleanup: an older version of this file wrote `.bak.*` siblings
+// directly next to .admin-security.json - move any still there into
+// ADMINBACKUPS/ so everything ends up in one place. Cheap to call on every
+// write since it's a no-op once nothing matches.
+function migrateLegacyBackups() {
+  try {
+    const dir = path.dirname(STORE_PATH);
+    const base = path.basename(STORE_PATH);
+    for (const n of fs.readdirSync(dir)) {
+      if (!n.startsWith(base + '.bak.')) continue;
+      try { fs.renameSync(path.join(dir, n), path.join(BACKUP_DIR, n)); } catch (_) {}
     }
   } catch (_) { /* best effort */ }
 }
@@ -146,8 +188,10 @@ function writeStore(store) {
   const text = JSON.stringify(store, null, 2);
   if (fs.existsSync(STORE_PATH)) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupPath = `${STORE_PATH}.bak.${stamp}`;
+    const backupPath = path.join(BACKUP_DIR, `${path.basename(STORE_PATH)}.bak.${stamp}`);
     try {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+      migrateLegacyBackups();
       fs.copyFileSync(STORE_PATH, backupPath);
       chmodQuiet(backupPath, FILE_MODE);
     } catch (_) { /* best effort */ }
@@ -186,29 +230,46 @@ function writeSecrets(account) {
 }
 
 // setup-admin.js only: wipes the ENTIRE store and replaces it with one fresh
-// owner account. Deliberately separate from writeSecrets (which only ever
-// touches one account within the existing store) - --reset means "start
-// over", not "add another account".
+// 'master_admin' account. Deliberately separate from writeSecrets (which
+// only ever touches one account within the existing store) - --reset means
+// "start over", not "add another account".
 function resetToSingleAccount(username, password) {
   writeStore({ accounts: [normalizeAccount({
-    username, password: hashPassword(password), role: 'owner', createdAt: Date.now(),
+    username, password: hashPassword(password), role: 'master_admin', createdAt: Date.now(),
   })] });
 }
 
 // Both throw a plain Error with a user-facing message on failure - callers
-// (the owner-only /api/security/accounts/* handlers) catch and relay it.
-function createAccount(username, password, role) {
+// (the master_admin-only /api/security/accounts/* handlers) catch and relay it.
+function createAccount(username, password, role, mfaRequired) {
   username = String(username || '').trim();
   if (!username) throw new Error('Username cannot be empty.');
-  if (String(password || '').length < 8) throw new Error('Password must be at least 8 characters.');
-  if (!ROLES.includes(role)) throw new Error('Role must be "owner" or "provider".');
+  const pwErr = passwordError(password);
+  if (pwErr) throw new Error(pwErr);
+  if (!ROLES.includes(role)) throw new Error('Role must be "master_admin" or "firewall_admin".');
 
   const store = loadStore() || { accounts: [] };
   if (store.accounts.some((a) => a.username.toLowerCase() === username.toLowerCase())) {
     throw new Error('An account with that username already exists.');
   }
-  const account = normalizeAccount({ username, password: hashPassword(password), role, createdAt: Date.now() });
+  const account = normalizeAccount({
+    username, password: hashPassword(password), role, mfaRequired: !!mfaRequired, createdAt: Date.now(),
+  });
   store.accounts.push(account);
+  writeStore(store);
+  return account;
+}
+
+// master_admin-only, via config-editor.js. Toggles whether this account MUST
+// set up MFA before it can use anything else (enforced at login - see
+// handleLoginPost's mfaSetupRequired). Does not itself enable/disable MFA -
+// an account that already has MFA on is unaffected either way.
+function setMfaRequired(username, required) {
+  const store = loadStore();
+  if (!store) throw new Error('No admin accounts configured.');
+  const account = store.accounts.find((a) => a.username === username);
+  if (!account) throw new Error('No such account.');
+  account.mfaRequired = !!required;
   writeStore(store);
   return account;
 }
@@ -224,6 +285,23 @@ function deleteAccount(username) {
   if (store.accounts.length <= 1) throw new Error('Cannot delete the only remaining admin account.');
   store.accounts.splice(idx, 1);
   writeStore(store);
+}
+
+// ---------------------------------------------------------------------------
+// password policy - length-focused (NIST 800-63B: length matters more than
+// forced character-class complexity, and arbitrary symbol rules mainly
+// annoy password-manager users without stopping real attacks). The single
+// source of truth for every place a new/changed admin password is accepted
+// (setup-admin.js, createAccount, change-password) - keep it there rather
+// than re-checking `.length` ad hoc so the rule can never drift between them.
+// ---------------------------------------------------------------------------
+const MIN_PASSWORD_LENGTH = 12;
+
+function passwordError(plain) {
+  if (String(plain || '').length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +472,8 @@ function verifyAndConsumeBackupCode(secrets, code) {
 module.exports = {
   STORE_PATH,
   ROLES,
+  MIN_PASSWORD_LENGTH,
+  passwordError,
   secretsExist,
   listAccounts,
   readSecrets,
@@ -401,6 +481,7 @@ module.exports = {
   resetToSingleAccount,
   createAccount,
   deleteAccount,
+  setMfaRequired,
   hashPassword,
   verifyPassword,
   generateTotpSecret,

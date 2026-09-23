@@ -578,15 +578,25 @@ function cookieHeader(token, maxAgeSec) {
 // until it passes) and true otherwise, so the gate is a no-op when MFA is
 // off.
 //
-// `role` ('owner'/'provider') is captured once here, the same "decided at
+// `role` ('master_admin'/'firewall_admin') is captured once here, the same "decided at
 // login, never re-checked" pattern mfaVerified already uses above - the only
 // way it can go stale is the account being deleted out from under the
 // session, and handleDeleteAccount revokes that account's sessions directly.
-function createSession(username, ip, mfaVerified, role) {
+//
+// `mfaSetupRequired` (v1.4): true only when the account's MFA is OFF but its
+// per-account policy (`mfaRequired`, set by a master_admin) demands it - see
+// handleLoginPost. Mutually exclusive with the mfaVerified gate in practice
+// (that gate only ever fires when MFA is already ON), but kept as its own
+// flag rather than overloading mfaVerified, since "must verify an existing
+// factor" and "must enroll a new one" need different allowed routes below.
+function createSession(username, ip, mfaVerified, role, mfaSetupRequired) {
   const token = crypto.randomBytes(32).toString('hex');
   const csrf = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
-  sessions.set(token, { username, ip, created: now, lastSeen: now, csrf, mfaVerified: !!mfaVerified, role: role || 'owner' });
+  sessions.set(token, {
+    username, ip, created: now, lastSeen: now, csrf,
+    mfaVerified: !!mfaVerified, role: role || 'master_admin', mfaSetupRequired: !!mfaSetupRequired,
+  });
   return { token, csrf };
 }
 
@@ -913,7 +923,7 @@ async function buildConfigPayload(session) {
       pm2: await hasPm2(),
       envPath,
       ip: session.ip,
-      role: session.role || 'owner',
+      role: session.role || 'master_admin',
       mfaEnabled: !!(secrets && secrets.mfa && secrets.mfa.enabled),
       backupCodesRemaining: secrets ? secrets.backupCodes.filter((c) => !c.usedAt).length : 0,
     },
@@ -1165,7 +1175,7 @@ function persistSessions() {
     const out = [];
     for (const [token, s] of sessions) {
       out.push({ token, username: s.username, ip: s.ip, created: s.created, lastSeen: s.lastSeen, csrf: s.csrf,
-        mfaVerified: !!s.mfaVerified, role: s.role });
+        mfaVerified: !!s.mfaVerified, role: s.role, mfaSetupRequired: !!s.mfaSetupRequired });
     }
     fs.writeFileSync(SESSION_STORE, JSON.stringify({ savedAt: Date.now(), sessions: out }), { mode: 0o600 });
     return out.length;
@@ -1205,9 +1215,16 @@ function loadPersistedSessions() {
       // login, so it should not re-challenge for MFA. Defaults to false (the
       // safer state) for an older persisted session that predates this field.
       mfaVerified: !!s.mfaVerified,
-      // Defaults to 'owner' for a session persisted before roles existed -
-      // matches normalizeAccount()'s same default for a pre-role account.
-      role: security.ROLES.includes(s.role) ? s.role : 'owner',
+      // Defaults to 'master_admin' for a session persisted before roles
+      // existed - matches normalizeAccount()'s same default for a pre-role
+      // account. (A session persisted with a pre-rename 'owner'/'provider'
+      // value won't match security.ROLES either, so it gets the same safe
+      // default rather than staying stuck on the old name.)
+      role: security.ROLES.includes(s.role) ? s.role : 'master_admin',
+      // Same reasoning: an older persisted session predates mfaRequired
+      // entirely, so false (no forced enrollment) is the accurate default,
+      // not just the "safe" one.
+      mfaSetupRequired: !!s.mfaSetupRequired,
     });
     restored++;
   }
@@ -1852,7 +1869,12 @@ async function handleLoginPost(req, res, ip) {
 
   loginFails.delete(ip);
   const mfaEnabled = !!(secrets.mfa && secrets.mfa.enabled);
-  const { token } = createSession(username, ip, !mfaEnabled, secrets.role);
+  // Policy requires MFA but this account hasn't set it up yet - route it into
+  // forced enrollment instead of the normal app (see the mfaSetupRequired
+  // gate in onRequest). Irrelevant once mfaEnabled is true: the existing
+  // verify-gate already covers that account from here on.
+  const mfaSetupRequired = !mfaEnabled && !!secrets.mfaRequired;
+  const { token } = createSession(username, ip, !mfaEnabled, secrets.role, mfaSetupRequired);
   const maxAge = Math.floor(ABSOLUTE_SESSION_MS / 1000);
   res.writeHead(302, {
     Location: '/',
@@ -1925,9 +1947,10 @@ async function handleChangePassword(req, res, session) {
     release('security');
     return sendJson(res, 401, { error: 'Current password is incorrect.' });
   }
-  if (next.length < 8) {
+  const pwErr = security.passwordError(next);
+  if (pwErr) {
     release('security');
-    return sendJson(res, 400, { error: 'New password must be at least 8 characters.' });
+    return sendJson(res, 400, { error: pwErr });
   }
 
   secrets.password = security.hashPassword(next);
@@ -1982,6 +2005,15 @@ async function handleMfaConfirm(req, res, session) {
   const backupCodes = security.generateBackupCodes(8);
   secrets.backupCodes = backupCodes.map((c) => security.hashBackupCode(c));
   security.writeSecrets(secrets);
+
+  // Clears the forced-enrollment gate for THIS session immediately, so an
+  // account with mfaRequired policy gets full access right after completing
+  // setup rather than needing to reload or log in again. A no-op for the
+  // voluntary (Security Settings) enrollment path, where this was already
+  // false. Same "mutate the stored Map entry, not the {token,...s} copy"
+  // trap as markSessionMfaVerified.
+  const stored = sessions.get(session.token);
+  if (stored) stored.mfaSetupRequired = false;
 
   // mfaVerified is decided once, at createSession() time, and never
   // re-checked against the account's current MFA state — so a session opened
@@ -2061,48 +2093,76 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
 }
 
 // ---------------------------------------------------------------------------
-// /api/security/accounts* — owner-only admin-account management (v1.4,
-// [[roadmap-hosted-platform]] item 4). A 'provider' account manages only its
-// OWN password/MFA above; only 'owner' can see, add, or remove OTHER admin
-// accounts. Browser session lane only, same as the rest of /api/security/*.
+// /api/security/accounts* — master_admin-only admin-account management
+// (v1.4, [[roadmap-hosted-platform]] item 4). A 'firewall_admin' account
+// manages only its OWN password/MFA above; only 'master_admin' ("Provider /
+// Master Admin" in the UI) can see, add, or remove OTHER admin accounts.
+// Browser session lane only, same as the rest of /api/security/*.
 // ---------------------------------------------------------------------------
-function requireOwner(res, session) {
-  if (session.role === 'owner') return true;
-  sendJson(res, 403, { error: 'Only an owner account can manage admin accounts.' });
+function requireMasterAdmin(res, session) {
+  if (session.role === 'master_admin') return true;
+  sendJson(res, 403, { error: 'Only a Provider / Master Admin account can manage admin accounts.' });
   return false;
 }
 
 function accountSummary(a) {
-  return { username: a.username, role: a.role, createdAt: a.createdAt, mfaEnabled: !!(a.mfa && a.mfa.enabled) };
+  return {
+    username: a.username, role: a.role, createdAt: a.createdAt,
+    mfaEnabled: !!(a.mfa && a.mfa.enabled), mfaRequired: !!a.mfaRequired,
+  };
 }
 
 async function handleListAccounts(req, res, session) {
-  if (!requireOwner(res, session)) return;
+  if (!requireMasterAdmin(res, session)) return;
   return sendJson(res, 200, { accounts: security.listAccounts().map(accountSummary) });
 }
 
 async function handleCreateAccount(req, res, session) {
-  if (!requireOwner(res, session)) return;
+  if (!requireMasterAdmin(res, session)) return;
   if (!acquire(res, 'security')) return;
   let body;
   try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
 
   let account;
   try {
-    account = security.createAccount(String(body.username || ''), String(body.password || ''), String(body.role || 'provider'));
+    account = security.createAccount(
+      String(body.username || ''), String(body.password || ''), String(body.role || 'firewall_admin'), !!body.mfaRequired,
+    );
   } catch (err) {
     release('security');
     return sendJson(res, 400, { error: err.message });
   }
 
   release('security');
-  log.info(`Admin account "${sanitizeForLog(account.username)}" (${account.role}) created by ` +
+  log.info(`Admin account "${sanitizeForLog(account.username)}" (${account.role}, mfaRequired=${account.mfaRequired}) created by ` +
+    `"${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  return sendJson(res, 200, { ok: true, account: accountSummary(account) });
+}
+
+async function handleSetMfaRequired(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  const username = String(body.username || '');
+  const required = !!body.required;
+
+  let account;
+  try {
+    account = security.setMfaRequired(username, required);
+  } catch (err) {
+    release('security');
+    return sendJson(res, 400, { error: err.message });
+  }
+
+  release('security');
+  log.info(`MFA policy for "${sanitizeForLog(username)}" set to required=${required} by ` +
     `"${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   return sendJson(res, 200, { ok: true, account: accountSummary(account) });
 }
 
 async function handleDeleteAccount(req, res, session) {
-  if (!requireOwner(res, session)) return;
+  if (!requireMasterAdmin(res, session)) return;
   if (!acquire(res, 'security')) return;
   let body;
   try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
@@ -2110,13 +2170,13 @@ async function handleDeleteAccount(req, res, session) {
 
   if (username === session.username) {
     release('security');
-    return sendJson(res, 400, { error: 'You cannot delete your own account while signed in as it — have another owner remove it.' });
+    return sendJson(res, 400, { error: 'You cannot delete your own account while signed in as it — have another Provider / Master Admin remove it.' });
   }
   const accounts = security.listAccounts();
   const target = accounts.find((a) => a.username === username);
-  if (target && target.role === 'owner' && accounts.filter((a) => a.role === 'owner').length <= 1) {
+  if (target && target.role === 'master_admin' && accounts.filter((a) => a.role === 'master_admin').length <= 1) {
     release('security');
-    return sendJson(res, 400, { error: 'Cannot delete the only remaining owner account.' });
+    return sendJson(res, 400, { error: 'Cannot delete the only remaining Provider / Master Admin account.' });
   }
 
   try {
@@ -2434,6 +2494,25 @@ async function onRequest(req, res) {
       return redirect(res, '/');
     }
 
+    // Forced-enrollment gate (v1.4): this account's mfaRequired policy is on
+    // but it hasn't set up MFA yet (mfaVerified above only gates an ALREADY
+    // enabled factor, so it's true here and doesn't catch this case). Only
+    // the setup/confirm endpoints and the app root (served the enrollment
+    // page instead of the normal app) are reachable until it completes.
+    if (session.mfaSetupRequired) {
+      if (pathname === '/api/security/mfa/setup' && method === 'POST') {
+        return handleMfaSetup(req, res, session);
+      }
+      if (pathname === '/api/security/mfa/confirm' && method === 'POST') {
+        return handleMfaConfirm(req, res, session);
+      }
+      if (pathname === '/' && method === 'GET') {
+        return sendPage(res, 200, (n) => views.mfaSetupRequiredPage({ csrf: session.csrf, nonce: n }));
+      }
+      if (wantsJson) return sendJson(res, 401, { error: 'MFA setup is required before continuing.' });
+      return redirect(res, '/');
+    }
+
     if (pathname === '/' && method === 'GET') {
       return sendPage(res, 200, (n) => views.appPage({ csrf: session.csrf, username: session.username, nonce: n }));
     }
@@ -2481,6 +2560,9 @@ async function onRequest(req, res) {
     }
     if (pathname === '/api/security/accounts/delete' && method === 'POST') {
       return handleDeleteAccount(req, res, session);
+    }
+    if (pathname === '/api/security/accounts/set-mfa-required' && method === 'POST') {
+      return handleSetMfaRequired(req, res, session);
     }
     if (pathname === '/api/sshkey' && method === 'POST') {
       return handleSshKey(req, res, session);

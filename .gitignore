@@ -23,6 +23,7 @@ ENVBACKUPS/
 # Admin password/MFA secrets store + its backups
 .admin-security.json
 .admin-security.json.bak.*
+ADMINBACKUPS/
 
 # SSH host key
 ssh_host_key
