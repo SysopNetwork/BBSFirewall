@@ -17,6 +17,7 @@ const metrics = require('./metrics');
 const { handleConnection } = require('./proxy');
 const { initializeGeoIP } = require('./geoip');
 const { initializeIPFilter } = require('./ipfilter');
+const ufwBlocks = require('./ufw-blocks');
 const { startSSHServer } = require('./ssh');
 const { startWebRedirectServer, stopWebRedirectServer } = require('./web-redirect');
 const { startConfigEditorServer, stopConfigEditorServer } = require('./config-editor');
@@ -38,14 +39,19 @@ class BBSFirewall {
     }
 
     logger.info('================================================');
-    logger.info('  BBSFirewall by Sysop Network');
+    // Printed regardless of LOG_LEVEL: a box running LOG_LEVEL=warn otherwise
+    // never says which build it is, which is the first question when
+    // comparing behaviour across boxes.
+    console.log(`[${new Date().toISOString()}] [INFO]   BBSFirewall v${require('./package.json').version} by Sysop Network`);
     logger.info('  https://github.com/SysopNetwork/BBSFirewall');
     logger.info('  Based on bbsfw by Ryan Fantus');
     logger.info('================================================');
     logger.info('Starting...');
 
     await initializeGeoIP();
-    initializeIPFilter(config);
+    const ipFilter = initializeIPFilter(config);
+    // Kernel-level block push (UFW_PUSH_BLOCKS) — a no-op subscriber when off.
+    ufwBlocks.start(ipFilter);
     // Daily is plenty (retention granularity is whole days anyway) and this
     // runs independently of the config editor, so pruning still happens even
     // with CONFIG_EDITOR_ENABLED=false.
@@ -203,6 +209,7 @@ class BBSFirewall {
 
       await stopWebRedirectServer();
       await stopConfigEditorServer();
+      ufwBlocks.stop();
 
       let serversToClose = 0;
       let serversClosed = 0;

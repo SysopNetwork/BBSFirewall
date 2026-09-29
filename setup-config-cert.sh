@@ -22,7 +22,7 @@
 #   validate. Browsers show a one-time trust warning.
 #
 #     bash setup-config-cert.sh 95.182.86.146 --self-signed
-#     bash setup-config-cert.sh bfd1.internal --self-signed
+#     bash setup-config-cert.sh fw.example.internal --self-signed
 #
 # Requirements (Let's Encrypt mode):
 #   - BBSFirewall running with WEB_REDIRECT_ENABLED=true

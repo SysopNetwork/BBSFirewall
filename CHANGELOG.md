@@ -3,6 +3,65 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
+## v1.5.0 — Unreleased
+
+### ✨ Added
+
+- **Host firewall (UFW) rule management** (Tools tab, Global Admin only, off by
+  default). Preview and then manually apply tagged ufw rules built from your own
+  settings — public listeners open to anyone, the config editor and admin SSH port
+  limited to Trusted Hosts. Apply is refused if it would leave the admin SSH port
+  without an allow rule. BBSFirewall never turns ufw itself on or off. Also shows
+  the host's own ufw drop log.
+- **Kernel-level block push** (`UFW_PUSH_BLOCKS`, off by default). Blocklist
+  entries and trigger auto-blocks are mirrored into ufw as `deny from` rules, so
+  blocked callers are dropped by the kernel even while BBSFirewall restarts.
+  Syncs automatically; temporary trigger blocks are removed when they expire.
+  Never pushes anything overlapping Trusted Hosts, the Whitelist, or loopback, and
+  refuses to push at all with an empty Trusted Hosts list. Capped by
+  `UFW_BLOCK_MAX_RULES` (default 1000). Status, "Sync now" and "Remove pushed
+  rules" live in the Tools tab.
+- **Log search** (Logs tab and `GET /api/logs/search`). Search every log file at
+  once by text, type, level and date range — every word must match, `"quotes"`
+  for a phrase, `-word` to exclude. Newest matches first, terms highlighted;
+  click a result to open that file at that exact line, with the lines around it.
+  Download all results as a text file.
+- **Better log viewer**: line numbers, colour-coded levels with on/off chips per
+  level, a live filter box, "Load older / newer lines" to page through files of
+  any size (it used to stop at the last 512 KB), and **Follow (live)** on today's
+  file to watch new lines arrive like `tail -f`.
+- **Download log files** from the file list or the viewer — the whole file, no
+  size limit (`GET /api/logs/download`) — or **every log file at once** as one
+  `.zip` with "Download all (.zip)" (`GET /api/logs/download-all`). Streamed, so
+  a big log folder doesn't use extra memory.
+
+### 🐛 Fixed
+
+- After "Restart firewall" (and self-update / reboot), the editor could reload
+  while the old process was still shutting down and come up empty — no settings,
+  no version — until a manual refresh. It now waits for the new process before
+  reloading, and retries loading its settings instead of giving up on the first
+  failed request. The exiting process also tells browsers to drop their
+  connection, so on a host running ufw the page no longer stalls for up to a
+  minute on a connection to the old process.
+- Host firewall (UFW) Preview/Apply compared Trusted Hosts entries as typed
+  (`1.2.3.4/32`, `0.0.0.0/0`) against ufw's own spelling (`1.2.3.4`, `Anywhere`),
+  so such entries showed a change that never went away — and Apply would have
+  deleted the matching rules. Rules are now always compared in ufw's form, and
+  "Anywhere" rules are added/removed one address family at a time (removing the
+  IPv4 one no longer silently removes the IPv6 one too).
+- The startup banner now shows the version at every LOG_LEVEL.
+- Host firewall (UFW) rules for the config editor port only admitted Trusted
+  Hosts, silently blocking uptime monitors listed only in Status Trusted Hosts and
+  Management API callers. The rule now admits all three lists (and any IP when the
+  API is on with an empty API allowlist, matching the app itself).
+- Logs tab: the search form and the per-category file tables now lay out
+  identically on every box — they used to shift depending on which log types
+  existed and how long their names were.
+- The self-updater compared versions by splitting on dots only, so a pre-release
+  like `1.5.0-beta.1` counted as *newer* than `1.5.0` and would never have been
+  offered the final release. Pre-release tags now sort before their release.
+
 ## v1.4.0 — 2026-09-23
 
 ### ✨ Added

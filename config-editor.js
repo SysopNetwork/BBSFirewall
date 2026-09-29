@@ -36,6 +36,8 @@ const execFileAsync = promisify(execFile);
 const logger = require('./logger');
 const { config } = require('./config');
 const trustedhosts = require('./trustedhosts');
+const ufw = require('./ufw');
+const ufwBlocks = require('./ufw-blocks');
 const views = require('./config-editor-ui');
 const metrics = require('./metrics');
 const security = require('./security');
@@ -70,6 +72,7 @@ const STATIC_ASSETS = {
 };
 
 let server = null;      // the https.Server (services connections handed to it by muxServer)
+let shuttingDown = false;
 let muxServer = null;    // the net.Server that actually listens on CONFIG_EDITOR_PORT
 let sweepTimer = null;
 let lastCpuSample = null;   // for CPU-% deltas
@@ -262,6 +265,24 @@ const ENV_SCHEMA = [
       { key: 'SSH_PROXY_PROTOCOL', type: 'bool', label: 'Send PROXY Protocol v1 to SSH backend', def: 'false',
         help: 'passthrough mode only. Prepend a PROXY v1 header for the backend sshd. Only enable if that sshd understands it — a plain SSH server drops the handshake otherwise.' },
     ]},
+  { name: 'Host Firewall (UFW)', icon: 'shield',
+    help: 'Optional — reconciles a tagged subset of this host’s own ufw rules against the settings above (telnet/SSH/web-redirect ports open to anyone, the config editor and admin SSH port scoped to Trusted Hosts). Requires ufw installed. Off by default. This never enables or disables ufw itself — turn ufw on yourself first; BBSFirewall only ever manages individual rules within an already-active ufw. Phase 1: preview/dry-run only from the Tools tab, nothing applies automatically yet.',
+    fields: [
+      { key: 'UFW_ENABLED', type: 'bool', label: 'Enable UFW rule management', def: 'false',
+        help: 'Needs Admin SSH port set below, and ufw already installed and enabled on this host.' },
+      { key: 'HOST_ADMIN_SSH_PORT', type: 'port', label: 'Admin SSH port (this host)', def: '',
+        help: 'The port YOU manage this server with — not necessarily SSH_LISTEN_PORT above, which is the BBS’s own SSH front door. Required to enable UFW management; never inferred.',
+        helpLong: 'This is deliberately a separate, explicit field rather than something BBSFirewall guesses. In SSH passthrough mode, port 22 is likely the BBS’s own sshd, not this host’s management SSH — conflating the two could compute a rule set that leaves your actual admin access without an allow rule. Scoped to the same Trusted Hosts list as the config editor.' },
+      { key: 'UFW_LIMIT_ADMIN_SSH', type: 'bool', label: 'Rate-limit the admin SSH port', def: 'false',
+        help: 'Adds ufw’s own kernel-level connection-rate limiting (denies an IP after 6 connection attempts in 30 seconds) on top of whatever this host’s sshd already does.' },
+      { key: 'UFW_AUTO_APPLY', type: 'bool', label: 'Auto-apply on save/startup', def: 'false',
+        help: 'Phase 2 — not yet available. When built, reconciles automatically instead of requiring a manual Preview + Apply from the Tools tab each time.' },
+      { key: 'UFW_PUSH_BLOCKS', type: 'bool', label: 'Push blocks to ufw (kernel-level)', def: 'false',
+        help: 'Mirrors Blocklist entries and trigger auto-blocks into ufw as "deny from" rules, so blocked callers are dropped by the kernel even while BBSFirewall restarts. Runs automatically. Needs UFW rule management on and a non-empty Trusted Hosts list.',
+        helpLong: 'Each rule denies the address on EVERY port, so entries that overlap Trusted Hosts, the Whitelist, or loopback are never pushed (the Tools tab lists any it skipped). Rate-limit blocks are not pushed — they are short and hit ordinary callers who reconnect too fast. Temporary trigger blocks are removed from ufw when they expire. Turning this off stops syncing but leaves already-pushed rules in place; remove them from the Tools tab.' },
+      { key: 'UFW_BLOCK_MAX_RULES', type: 'int', label: 'Max pushed block rules', def: '1000',
+        help: 'Upper limit on kernel block rules (1-10000). Over the limit, temporary blocks come first, then CIDR ranges, then the newest single IPs — the app still blocks everything else itself.' },
+    ]},
 ];
 
 const SCHEMA_KEYS = new Set(ENV_SCHEMA.flatMap((s) => s.fields.map((f) => f.key)));
@@ -386,6 +407,12 @@ function inlineValidate(map) {
   port('CONFIG_EDITOR_PORT', 'CONFIG_EDITOR_PORT');
   port('SSH_LISTEN_PORT', 'SSH_LISTEN_PORT');
   port('HTTPS_REDIRECT_PORT', 'HTTPS_REDIRECT_PORT');
+  port('HOST_ADMIN_SSH_PORT', 'HOST_ADMIN_SSH_PORT');
+
+  if (map.UFW_ENABLED && map.UFW_ENABLED.value === 'true' && map.UFW_ENABLED.enabled !== false &&
+      (!map.HOST_ADMIN_SSH_PORT || !map.HOST_ADMIN_SSH_PORT.value)) {
+    errors.push('HOST_ADMIN_SSH_PORT is required when UFW rule management is enabled');
+  }
 
   if (map.CONFIG_EDITOR_PORT && map.LISTEN_PORT &&
       map.CONFIG_EDITOR_PORT.value && map.LISTEN_PORT.value &&
@@ -1240,6 +1267,9 @@ async function doSave(req, res, session) {
       if (typeof filesInput.triggers === 'string' && ipf.reloadTriggers) ipf.reloadTriggers();
     }
   } catch (_) { /* ipfilter not ready — restart will pick it up */ }
+  // Trusted Hosts protects addresses from the kernel block push, so a change
+  // there must reconcile too (the list reloads above only cover ipfilter's).
+  ufwBlocks.requestSync();
 
   log.info(`Config saved by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
 
@@ -1666,6 +1696,214 @@ async function handleCert(req, res, session) {
 }
 
 // ---------------------------------------------------------------------------
+// UFW shared state computation — used by both /api/ufw/preview and
+// /api/ufw/apply so they can never diverge on what "current" and "desired"
+// mean. Always re-reads live ufw state and recomputes from the CURRENT
+// config on every call — apply must never act on a diff the client merely
+// remembers from an earlier preview (config or the live rules could have
+// changed in between). Returns either { error, status, ...partial } for a
+// non-fatal "here's why there's nothing to show" case, or the full state.
+// ---------------------------------------------------------------------------
+async function computeUfwState() {
+  if (!config.ufw.enabled) {
+    return { ok: false, status: 200, body: { enabled: false } };
+  }
+
+  const available = await ufw.hasUfw();
+  if (!available) {
+    return { ok: false, status: 200, body: { enabled: true, available: false, error: 'ufw is not installed on this host.' } };
+  }
+
+  let current;
+  try {
+    current = await ufw.getCurrentRules();
+  } catch (err) {
+    return { ok: false, status: 500, body: { enabled: true, available: true, error: `Could not read ufw status: ${err.message}` } };
+  }
+
+  if (!current.active) {
+    return {
+      ok: false, status: 200,
+      body: {
+        enabled: true, available: true, ufwActive: false,
+        error: 'ufw is installed but not enabled on this host. Enable it yourself first — ' +
+          'BBSFirewall never turns ufw on or off, only manages rules within an already-active ufw.',
+      },
+    };
+  }
+
+  const adminPort = config.ufw.adminSshPort;
+  const ipv6Supported = ufw.hasIpv6Support();
+  const desired = ufw.desiredRules(config, {
+    trustedHosts: loadedTrustedHosts ? loadedTrustedHosts.entries : [],
+    statusHosts: loadedStatusHosts ? loadedStatusHosts.entries : [],
+    apiHosts: loadedApiHosts ? loadedApiHosts.entries : [],
+    apiEnabled: !!config.api.enabled,
+    adminSshPort: adminPort,
+    limitAdminSsh: config.ufw.limitAdminSsh,
+    ipv6Supported,
+  });
+  const diff = ufw.diffRules(current.rules, desired);
+
+  // Safety rail: a diff must never be allowed to leave the admin SSH port
+  // without an allow/limit rule. Since
+  // desiredRules() only omits that rule when adminTrustedHosts ends up empty
+  // (typically an empty trustedhosts.txt), checking "does desired contain a
+  // rule for this port" catches both an unset port AND an empty trust list in
+  // one place, rather than re-deriving the same condition two different ways.
+  const adminRuleOk = !adminPort || desired.some((r) => r.to === `${adminPort}/tcp`);
+
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      enabled: true,
+      available: true,
+      ufwActive: true,
+      adminSshPort: adminPort,
+      adminRuleOk,
+      ipv6Supported,
+      current: current.rules.filter((r) => r.comment === ufw.TAG),
+      desired,
+      diff,
+      inSync: diff.toAdd.length === 0 && diff.toRemove.length === 0,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// /api/ufw/preview — Global Admin only, read-only. Phase 1 (see ufw.js):
+// reports drift between the
+// host's current tagged ufw rules and what BBSFirewall's config would want,
+// but never applies anything. Browser session lane only, same reasoning as
+// /api/reboot: an action this shaped deserves an interactive admin looking
+// at a diff, not a bare API key.
+// ---------------------------------------------------------------------------
+async function handleUfwPreview(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  const state = await computeUfwState();
+  return sendJson(res, state.status, state.body);
+}
+
+// ---------------------------------------------------------------------------
+// /api/ufw/apply — Global Admin only, mutating. Requires typing "APPLY" to
+// confirm (same UX pattern as /api/reboot's "REBOOT"), and always recomputes
+// the diff fresh server-side rather than trusting anything the client saw in
+// an earlier preview — see computeUfwState()'s own comment for why. Hard
+// refuses if adminRuleOk is false: the whole point of the admin-port safety
+// rail is that this check runs immediately before the one action that could
+// act on its absence, not just at preview time where a refusal is easy to
+// shrug off and click past anyway (there's no "past" to click here — preview
+// and apply are two different requests).
+// ---------------------------------------------------------------------------
+async function handleUfwApply(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  if (!acquire(res, 'ufw')) return;
+
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  if (String(body.confirm || '') !== 'APPLY') {
+    release('ufw');
+    return sendJson(res, 400, { error: 'Type APPLY to confirm.' });
+  }
+
+  const state = await computeUfwState();
+  if (!state.ok) {
+    release('ufw');
+    return sendJson(res, state.status, state.body);
+  }
+  if (!state.body.adminRuleOk) {
+    release('ufw');
+    return sendJson(res, 400, {
+      error: `Refusing: the computed rule set would leave the admin SSH port (${state.body.adminSshPort}) ` +
+        'without an allow/limit rule — check Trusted Hosts is not empty, then try again.',
+    });
+  }
+  if (state.body.inSync) {
+    release('ufw');
+    return sendJson(res, 200, { ok: true, applied: false, message: 'Already in sync — nothing to apply.' });
+  }
+
+  const diff = state.body.diff;
+  log.warn(`UFW apply requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)} — ` +
+    `${diff.toAdd.length} to add, ${diff.toRemove.length} to remove: ${JSON.stringify(diff)}`);
+
+  let result;
+  try {
+    result = await ufw.applyDiff(diff, { dryRun: false });
+  } catch (err) {
+    release('ufw');
+    log.error(`UFW apply failed: ${err.message}`);
+    return sendJson(res, 500, { error: `Apply failed partway through: ${err.message}. Preview again to see the current state — some changes may have already taken effect.` });
+  }
+
+  release('ufw');
+  log.warn(`UFW apply completed by "${sanitizeForLog(session.username)}": ${JSON.stringify(result.changes)}`);
+  return sendJson(res, 200, { ok: true, applied: true, changes: result.changes });
+}
+
+// ---------------------------------------------------------------------------
+// /api/ufw/log — Global Admin only, read-only. A connection
+// ufw blocks at the kernel level never reaches BBSFirewall, so without this
+// it is invisible in the app's own logs. Tails /var/log/ufw.log (standard
+// Ubuntu path, see ufw.js's getRecentLog() comment) — not one of file-logger's
+// managed files, so no list/view/delete UI reuse; this only ever reads it.
+// Gated behind the same UFW_ENABLED flag as the rest of the feature rather
+// than a separate toggle.
+// ---------------------------------------------------------------------------
+async function handleUfwLog(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  if (!config.ufw.enabled) {
+    return sendJson(res, 200, { enabled: false });
+  }
+  const result = ufw.getRecentLog();
+  return sendJson(res, 200, { enabled: true, ...result });
+}
+
+// ---------------------------------------------------------------------------
+// /api/ufw/blocks* — kernel-level block push (ufw-blocks.js). Global Admin,
+// browser lane only, same as the rest of the UFW card. Status is read-only;
+// "sync" just runs the same reconcile the automatic triggers run; "remove"
+// deletes every bbsfw-auto rule and is refused while the push is still on.
+// ---------------------------------------------------------------------------
+async function handleUfwBlocksStatus(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  return sendJson(res, 200, await ufwBlocks.getStatus());
+}
+
+async function handleUfwBlocksSync(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  if (!config.ufw.enabled || !config.ufw.pushBlocks) {
+    return sendJson(res, 400, { error: 'Block push is off — enable "Push blocks to ufw" in Settings first.' });
+  }
+  log.info(`UFW block sync requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  // Not awaited: a first push of a large blocklist can outlast the HTTP
+  // request timeout. The UI polls GET /api/ufw/blocks for progress instead.
+  ufwBlocks.syncNow().catch((err) => log.error(`UFW block sync failed: ${err.message}`));
+  return sendJson(res, 200, { ok: true, started: true });
+}
+
+async function handleUfwBlocksRemove(req, res, session) {
+  if (!requireMasterAdmin(res, session)) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+  if (String(body.confirm || '') !== 'REMOVE') {
+    return sendJson(res, 400, { error: 'Type REMOVE to confirm.' });
+  }
+  if (!acquire(res, 'ufw')) return;
+  try {
+    const result = await ufwBlocks.removeAll();
+    log.warn(`UFW pushed block rules removed by "${sanitizeForLog(session.username)}" from ${clientIp(req)}: ` +
+      `${result.removed} removed, ${result.errors.length} error(s)`);
+    return sendJson(res, 200, { ok: result.errors.length === 0, ...result });
+  } catch (err) {
+    return sendJson(res, 400, { error: err.message });
+  } finally {
+    release('ufw');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // /api/update/* — self-update via updater.js (see its header for the full
 // backup -> download -> overlay -> npm install -> validateConfig() ->
 // restart, with an automatic rollback on any failure).
@@ -1959,8 +2197,6 @@ function handleStats(res) {
 // Listing and viewing are plain reads; delete goes through the same one-at-a-
 // time busy lock as the other mutating Tools actions.
 // ---------------------------------------------------------------------------
-const LOG_VIEW_MAX_BYTES = 512 * 1024;
-
 function handleLogsList(res) {
   try {
     const files = require('./file-logger').listLogFiles();
@@ -1974,15 +2210,122 @@ function handleLogsList(res) {
   }
 }
 
-function handleLogsView(res, query) {
+// Optional paging params (the viewer's "Load older", "Follow" and jump-to-a-
+// search-hit): ?before=<byte>, ?after=<byte>, or ?line=<n>. With none, the
+// response is the same tail it always was, plus the offsets — `content`,
+// `truncated` and `size` keep their original meaning for existing API callers.
+async function handleLogsView(res, query) {
   const proxy = query.get('proxy') || '';
   const file = query.get('file') || '';
+  const fl = require('./file-logger');
   try {
-    const result = require('./file-logger').readLogFile(proxy, file, { maxBytes: LOG_VIEW_MAX_BYTES });
-    return sendJson(res, 200, { proxy, file, ...result });
+    let result;
+    if (query.get('line')) {
+      result = await fl.readLogAroundLine(proxy, file, query.get('line'));
+    } else if (query.get('after') !== null) {
+      result = await fl.readLogRange(proxy, file, { after: query.get('after') });
+    } else if (query.get('before') !== null) {
+      result = await fl.readLogRange(proxy, file, { before: query.get('before') });
+    } else {
+      result = await fl.readLogRange(proxy, file);
+    }
+    return sendJson(res, 200, { proxy, file, truncated: !result.atStart, ...result });
   } catch (err) {
     if (err.code === 'ENOENT') return sendJson(res, 404, { error: 'Log file not found' });
     return sendJson(res, 400, { error: err.message });
+  }
+}
+
+// Streams the whole file as an attachment — no size cap, never buffered.
+function handleLogsDownload(res, query) {
+  const proxy = query.get('proxy') || '';
+  const file = query.get('file') || '';
+  let full;
+  try {
+    full = require('./file-logger').logFilePath(proxy, file);
+  } catch (err) {
+    if (err.code === 'ENOENT') return sendJson(res, 404, { error: 'Log file not found' });
+    return sendJson(res, 400, { error: err.message });
+  }
+  // `file` passed resolveLogFile()'s strict [a-z0-9-] + date shape, so it is
+  // safe to put in the header as-is.
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${file}"`,
+    'Content-Length': fs.statSync(full).size,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  const stream = fs.createReadStream(full);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
+}
+
+// Streams files (never loads them whole) and yields between chunks, so a
+// search can't stall proxying — but it is still disk + CPU work, so only a
+// couple may run at once.
+const LOG_SEARCH_MAX_CONCURRENT = 2;
+let logSearchesRunning = 0;
+
+async function handleLogsSearch(res, query) {
+  if (logSearchesRunning >= LOG_SEARCH_MAX_CONCURRENT) {
+    return sendJson(res, 429, { error: 'Another log search is still running — try again in a moment.' });
+  }
+  logSearchesRunning++;
+  try {
+    const started = Date.now();
+    const result = await require('./file-logger').searchLogs({
+      q: query.get('q') || '',
+      proxy: query.get('proxy') || '',
+      level: query.get('level') || '',
+      from: query.get('from') || '',
+      to: query.get('to') || '',
+      limit: query.get('limit') || '',
+    });
+    return sendJson(res, 200, { ...result, ms: Date.now() - started });
+  } catch (err) {
+    return sendJson(res, 400, { error: err.message });
+  } finally {
+    logSearchesRunning--;
+  }
+}
+
+// Every log file in one .zip, streamed (zip-stream.js) — nothing is buffered,
+// so a large log folder costs disk reads, not memory. Size/count are checked
+// BEFORE any bytes go out: once streaming starts, an error can only cut the
+// download short, not turn into a clean JSON error.
+let logZipsRunning = 0;
+async function handleLogsDownloadAll(req, res) {
+  const zip = require('./zip-stream');
+  const files = require('./file-logger').listLogFiles();
+  if (!files.length) return sendJson(res, 404, { error: 'There are no log files to download.' });
+  const total = files.reduce((n, f) => n + f.size, 0);
+  if (total > zip.MAX_ZIP_BYTES || files.length > zip.MAX_ZIP_ENTRIES) {
+    return sendJson(res, 413, { error: 'Too much log data for one zip — download files individually, or lower LOG_RETENTION_DAYS.' });
+  }
+  if (logZipsRunning >= 2) return sendJson(res, 429, { error: 'Another log download is still running — try again in a moment.' });
+  logZipsRunning++;
+  const host = require('os').hostname().toLowerCase().replace(/[^a-z0-9.-]/g, '') || 'bbsfirewall';
+  const name = `bbsfirewall-logs-${host}-${new Date().toISOString().slice(0, 10)}.zip`;
+  const root = path.resolve(config.fileLog.dir || './logs');
+  res.writeHead(200, {
+    'Content-Type': 'application/zip',
+    'Content-Disposition': `attachment; filename="${name}"`,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  try {
+    await zip.streamZip(res, files.map((f) => ({
+      name: `${f.proxy}/${f.file}`,
+      path: path.join(root, f.proxy, f.file),
+      mtime: new Date(f.mtime),
+    })));
+    res.end();
+  } catch (err) {
+    log.error(`Log zip download failed: ${err.message}`);
+    res.destroy(); // a truncated zip must not look complete
+  } finally {
+    logZipsRunning--;
   }
 }
 
@@ -2570,6 +2913,18 @@ async function handleApiRequest(req, res, ip, presentedKey) {
     log.info(`API: log file viewed by ${ip}: ${sanitizeForLog(query.get('proxy'))}/${sanitizeForLog(query.get('file'))}`);
     return handleLogsView(res, query);
   }
+  if (pathname === '/api/logs/download' && method === 'GET') {
+    log.info(`API: log file downloaded by ${ip}: ${sanitizeForLog(query.get('proxy'))}/${sanitizeForLog(query.get('file'))}`);
+    return handleLogsDownload(res, query);
+  }
+  if (pathname === '/api/logs/download-all' && method === 'GET') {
+    log.info(`API: all log files downloaded (zip) by ${ip}`);
+    return handleLogsDownloadAll(req, res);
+  }
+  if (pathname === '/api/logs/search' && method === 'GET') {
+    log.info(`API: logs searched by ${ip}: ${sanitizeForLog(query.get('q'))}`);
+    return handleLogsSearch(res, query);
+  }
   if (pathname === '/api/logs/delete' && method === 'POST') {
     return handleLogsDelete(req, res, session);
   }
@@ -2625,6 +2980,13 @@ function handleStatusEndpoint(req, res, ip) {
 }
 
 async function onRequest(req, res) {
+  // During shutdown, keep answering (see stopConfigEditorServer) but tell the
+  // client to drop the connection afterwards, so a browser polling for the
+  // restart doesn't keep reusing a socket to the exiting process. Once that
+  // process is gone, a host firewall that drops packets for closed
+  // connections (ufw's default INVALID rule) never sends a reset back, and a
+  // request on the stale socket just hangs until the browser gives up.
+  if (shuttingDown) res.setHeader('Connection', 'close');
   const ip = clientIp(req);
 
   // Status lane: checked first, before the Management API key lane and the
@@ -2770,6 +3132,24 @@ async function onRequest(req, res) {
     if (pathname === '/api/reboot' && method === 'POST') {
       return handleRebootServer(req, res, session);
     }
+    if (pathname === '/api/ufw/preview' && method === 'GET') {
+      return handleUfwPreview(req, res, session);
+    }
+    if (pathname === '/api/ufw/apply' && method === 'POST') {
+      return handleUfwApply(req, res, session);
+    }
+    if (pathname === '/api/ufw/log' && method === 'GET') {
+      return handleUfwLog(req, res, session);
+    }
+    if (pathname === '/api/ufw/blocks' && method === 'GET') {
+      return handleUfwBlocksStatus(req, res, session);
+    }
+    if (pathname === '/api/ufw/blocks/sync' && method === 'POST') {
+      return handleUfwBlocksSync(req, res, session);
+    }
+    if (pathname === '/api/ufw/blocks/remove' && method === 'POST') {
+      return handleUfwBlocksRemove(req, res, session);
+    }
     if (pathname === '/api/geoip' && method === 'POST') {
       return handleGeoip(req, res, session);
     }
@@ -2826,6 +3206,18 @@ async function onRequest(req, res) {
     }
     if (pathname === '/api/logs/view' && method === 'GET') {
       return handleLogsView(res, query);
+    }
+    if (pathname === '/api/logs/download' && method === 'GET') {
+      log.info(`Log file downloaded by "${sanitizeForLog(session.username)}" from ${clientIp(req)}: ` +
+        `${sanitizeForLog(query.get('proxy'))}/${sanitizeForLog(query.get('file'))}`);
+      return handleLogsDownload(res, query);
+    }
+    if (pathname === '/api/logs/download-all' && method === 'GET') {
+      log.info(`All log files downloaded (zip) by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+      return handleLogsDownloadAll(req, res);
+    }
+    if (pathname === '/api/logs/search' && method === 'GET') {
+      return handleLogsSearch(res, query);
     }
     if (pathname === '/api/logs/delete' && method === 'POST') {
       return handleLogsDelete(req, res, session);
@@ -3019,6 +3411,10 @@ function respondPlainRedirect(socket, firstChunk, ce) {
 
 function stopConfigEditorServer() {
   return new Promise((resolve) => {
+    shuttingDown = true;
+    // Idle keep-alive sockets have nothing left to finish - close them now so
+    // clients reconnect (to the next process) instead of reusing them.
+    if (server && typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
     if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
     // Deliberately NOT sessions.clear() here: muxServer.close() only stops
     // NEW connections — an already-open keep-alive socket (e.g. a browser

@@ -220,6 +220,149 @@ function readLogFile(proxyName, fileName, opts = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Ranged reads for the Logs-tab viewer: page backwards through a big file,
+// follow today's file live, or open a window around one line (a search hit).
+// Every result carries byte offsets (start/end) so the client can ask for
+// the next page, plus firstLine (1-based line number of the first returned
+// line, or null when counting would cost too much) for line numbers.
+// ---------------------------------------------------------------------------
+const VIEW_CHUNK_BYTES = 512 * 1024;
+const LINE_COUNT_MAX_BYTES = 64 * 1024 * 1024; // beyond this, skip line numbers
+
+// Count newlines in [0, offset) by streaming — never reads the file whole.
+async function countLinesBefore(full, offset) {
+  if (offset <= 0) return 0;
+  if (offset > LINE_COUNT_MAX_BYTES) return null;
+  let n = 0;
+  const stream = fs.createReadStream(full, { start: 0, end: offset - 1 });
+  for await (const chunk of stream) {
+    let i = chunk.indexOf(10);
+    while (i !== -1) { n++; i = chunk.indexOf(10, i + 1); }
+  }
+  return n;
+}
+
+function readBytes(full, start, end) {
+  const len = Math.max(0, end - start);
+  const buf = Buffer.alloc(len);
+  if (!len) return buf;
+  const fd = fs.openSync(full, 'r');
+  try {
+    fs.readSync(fd, buf, 0, len, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return buf;
+}
+
+/**
+ * opts (at most one of):
+ *   before: byte offset — the chunk of up to VIEW_CHUNK_BYTES ending there
+ *   after:  byte offset — new COMPLETE lines from there to EOF (follow mode)
+ *   (none)  — the last VIEW_CHUNK_BYTES of the file (the default view)
+ * Chunk edges are snapped to whole lines. Returns
+ *   { content, start, end, size, firstLine, atStart, reset? }
+ */
+async function readLogRange(proxyName, fileName, opts = {}) {
+  const full = resolveLogFile(proxyName, fileName);
+  const size = fs.statSync(full).size; // ENOENT -> caller maps to 404
+
+  if (opts.after !== undefined) {
+    let after = Number(opts.after);
+    if (!Number.isFinite(after) || after < 0) throw new Error('invalid offset');
+    // The file shrank (deleted and recreated) — tell the client to reload.
+    if (after > size) return { content: '', start: size, end: size, size, firstLine: null, atStart: false, reset: true };
+    const end = Math.min(size, after + VIEW_CHUNK_BYTES);
+    const buf = readBytes(full, after, end);
+    const lastNl = buf.lastIndexOf(10);
+    const usable = lastNl === -1 ? 0 : lastNl + 1; // a half-written last line waits for the next poll
+    return {
+      content: buf.subarray(0, usable).toString('utf8'),
+      start: after,
+      end: after + usable,
+      size,
+      firstLine: null, // the client already knows where it left off
+      atStart: after === 0,
+    };
+  }
+
+  let end = size;
+  if (opts.before !== undefined) {
+    end = Number(opts.before);
+    if (!Number.isFinite(end) || end < 0 || end > size) throw new Error('invalid offset');
+  }
+  let start = Math.max(0, end - VIEW_CHUNK_BYTES);
+  const buf = readBytes(full, start, end);
+  let text = buf;
+  if (start > 0) {
+    const nl = buf.indexOf(10);
+    if (nl === -1) { text = Buffer.alloc(0); start = end; } else { text = buf.subarray(nl + 1); start += nl + 1; }
+  }
+  const before = await countLinesBefore(full, start);
+  return {
+    content: text.toString('utf8'),
+    start,
+    end,
+    size,
+    firstLine: before === null ? null : before + 1,
+    atStart: start === 0,
+  };
+}
+
+/**
+ * A window of lines centred on `line` (1-based) — what a search hit opens.
+ * Streams to the target, so it is linear in the file up to that point.
+ * Returns the same shape as readLogRange() plus targetLine.
+ */
+async function readLogAroundLine(proxyName, fileName, line, context = 150) {
+  const full = resolveLogFile(proxyName, fileName);
+  const size = fs.statSync(full).size;
+  const target = parseInt(line, 10);
+  if (!Number.isFinite(target) || target < 1) throw new Error('invalid line');
+  const from = Math.max(1, target - context);
+  const to = target + context;
+
+  const readline = require('readline');
+  const stream = fs.createReadStream(full);
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const lines = [];
+  let lineNo = 0;
+  let offset = 0;
+  let start = 0;
+  let end = 0;
+  try {
+    for await (const l of rl) {
+      lineNo++;
+      const len = Buffer.byteLength(l) + 1;
+      if (lineNo === from) start = offset;
+      offset += len;
+      if (lineNo >= from) { lines.push(l); end = offset; }
+      if (lineNo >= to) break;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  if (!lines.length) throw new Error('line is past the end of the file');
+  return {
+    content: lines.join('\n') + '\n',
+    start,
+    end: Math.min(end, size),
+    size,
+    firstLine: from,
+    atStart: start === 0,
+    targetLine: target,
+  };
+}
+
+// Absolute path of a validated log file, for streaming a download.
+function logFilePath(proxyName, fileName) {
+  const full = resolveLogFile(proxyName, fileName);
+  fs.statSync(full); // ENOENT -> caller maps to 404
+  return full;
+}
+
 /**
  * Delete a rotated log file. If it's the proxy's currently-open file, close
  * the write stream first — an open write handle can otherwise keep the file
@@ -260,6 +403,144 @@ function pruneOldLogs() {
   return deleted;
 }
 
+// ---------------------------------------------------------------------------
+// Search across every rotated log file.
+//
+// Query syntax (case-insensitive): every bare word must appear somewhere in
+// the line; "a quoted phrase" must appear as-is; a leading "-" (-debug,
+// -"rate limit") excludes lines containing it. Plain substring matching only
+// — no user-supplied regex, since a catastrophic pattern would freeze the
+// whole firewall (single event loop) for as long as the scan ran.
+//
+// Files are streamed line by line (never read whole) newest date first, and
+// the scan stops at `limit` matches or `maxBytes` scanned, whichever comes
+// first. Within a file only the LAST matches are kept when the limit bites,
+// so results are always the newest ones.
+// ---------------------------------------------------------------------------
+const SEARCH_LEVELS = ['BLOCKED', 'ERROR', 'CONNECTION', 'WARN', 'INFO', 'DEBUG'];
+const SEARCH_MAX_LINE = 2000;
+
+function parseQuery(q) {
+  const include = [];
+  const exclude = [];
+  const s = String(q || '');
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) break;
+    let neg = false;
+    if (s[i] === '-' && i + 1 < s.length && !/\s/.test(s[i + 1])) { neg = true; i++; }
+    let term;
+    if (s[i] === '"') {
+      const end = s.indexOf('"', i + 1);
+      term = end === -1 ? s.slice(i + 1) : s.slice(i + 1, end);
+      i = end === -1 ? s.length : end + 1;
+    } else {
+      const start = i;
+      while (i < s.length && !/\s/.test(s[i])) i++;
+      term = s.slice(start, i);
+    }
+    term = term.toLowerCase();
+    if (term) (neg ? exclude : include).push(term);
+  }
+  return { include, exclude };
+}
+
+function lineMatches(line, parsed, levelTag) {
+  if (levelTag && !line.includes(levelTag)) return false;
+  const lower = line.toLowerCase();
+  for (const t of parsed.include) if (!lower.includes(t)) return false;
+  for (const t of parsed.exclude) if (lower.includes(t)) return false;
+  return true;
+}
+
+async function searchFile(full, parsed, levelTag, keep, onBytes) {
+  const readline = require('readline');
+  const stream = fs.createReadStream(full, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const hits = [];
+  let total = 0;
+  let lineNo = 0;
+  try {
+    for await (const line of rl) {
+      lineNo++;
+      onBytes(Buffer.byteLength(line) + 1);
+      if (!lineMatches(line, parsed, levelTag)) continue;
+      total++;
+      hits.push({ line: lineNo, text: line.length > SEARCH_MAX_LINE ? line.slice(0, SEARCH_MAX_LINE) + ' …' : line });
+      if (hits.length > keep) hits.shift();
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  return { hits, total };
+}
+
+/**
+ * opts: { q, proxy, level, from, to, limit, maxBytes }
+ *   proxy       - one proxy folder name, or empty for all
+ *   level       - one of SEARCH_LEVELS, or empty for any
+ *   from / to   - inclusive YYYY-MM-DD bounds on the file date
+ */
+async function searchLogs(opts = {}) {
+  const parsed = parseQuery(opts.q);
+  const level = String(opts.level || '').toUpperCase();
+  if (level && !SEARCH_LEVELS.includes(level)) throw new Error('invalid level');
+  const levelTag = level ? `] [${level}] ` : '';
+  if (!parsed.include.length && !parsed.exclude.length && !levelTag) {
+    throw new Error('Enter something to search for, or pick a level');
+  }
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  for (const k of ['from', 'to']) {
+    if (opts[k] && !dateRe.test(opts[k])) throw new Error(`invalid ${k} date`);
+  }
+  const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 500, 1), 2000);
+  const maxBytes = opts.maxBytes || 256 * 1024 * 1024;
+
+  const files = listLogFiles()
+    .filter((f) => !opts.proxy || f.proxy === opts.proxy)
+    .filter((f) => (!opts.from || f.date >= opts.from) && (!opts.to || f.date <= opts.to))
+    .sort((a, b) => b.date.localeCompare(a.date) || a.proxy.localeCompare(b.proxy));
+
+  const matches = [];
+  let totalMatches = 0;
+  let bytesScanned = 0;
+  let filesScanned = 0;
+  let limitReached = false;
+  let bytesCapReached = false;
+
+  for (const f of files) {
+    if (matches.length >= limit) { limitReached = true; break; }
+    if (bytesScanned >= maxBytes) { bytesCapReached = true; break; }
+    let res;
+    try {
+      res = await searchFile(resolveLogFile(f.proxy, f.file), parsed, levelTag, limit - matches.length,
+        (n) => { bytesScanned += n; });
+    } catch (_) {
+      continue; // pruned/deleted mid-search — skip it
+    }
+    filesScanned++;
+    totalMatches += res.total;
+    if (res.total > res.hits.length) limitReached = true;
+    for (let i = res.hits.length - 1; i >= 0; i--) {
+      matches.push({ proxy: f.proxy, file: f.file, date: f.date, ...res.hits[i] });
+    }
+  }
+
+  return {
+    terms: parsed,
+    matches,
+    totalMatches,
+    filesScanned,
+    filesTotal: files.length,
+    bytesScanned,
+    limit,
+    limitReached,
+    bytesCapReached,
+  };
+}
+
 let pruneTimer = null;
 
 // Runs pruneOldLogs() once immediately (so a freshly-lowered retention value
@@ -273,4 +554,8 @@ function startPruning(intervalMs) {
   if (pruneTimer.unref) pruneTimer.unref();
 }
 
-module.exports = { write, closeAll, LEVELS, listLogFiles, readLogFile, deleteLogFile, pruneOldLogs, startPruning };
+module.exports = {
+  write, closeAll, LEVELS, listLogFiles, readLogFile, deleteLogFile, pruneOldLogs, startPruning,
+  searchLogs, parseQuery, SEARCH_LEVELS,
+  readLogRange, readLogAroundLine, logFilePath,
+};

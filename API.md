@@ -119,7 +119,10 @@ rather than failing — but API clients should call `https://` directly.
 | `POST /api/update/apply` | Download and apply an update, then restart | `{}` or `{"tag": "v1.4.0", "keepSession": false}` |
 | `POST /api/update/rollback` | Restore a previous update backup, then restart | `{"backup": "pre-update-1.3.7-…"}` |
 | `GET /api/logs` | List rotated log files (`file-logger.js`'s per-proxy `logs/<proxy>/` folders) | — |
-| `GET /api/logs/view` | Read one log file's content (tailed if large) | — (`?proxy=` and `?file=` query params) |
+| `GET /api/logs/view` | Read one log file's content (tailed if large; optional paging) | — (`?proxy=` and `?file=`, plus optional `before`, `after` or `line`) |
+| `GET /api/logs/download` | Download one whole log file (streamed, `text/plain` attachment) | — (`?proxy=` and `?file=`) |
+| `GET /api/logs/download-all` | Every log file in one `.zip` (streamed, `<proxy>/<file>` paths inside) | — |
+| `GET /api/logs/search` | Search every log file (newest matches first) | — (`?q=`, optional `proxy`, `level`, `from`, `to`, `limit`) |
 | `POST /api/logs/delete` | Permanently delete one log file | `{"proxy": "telnet", "file": "telnet-2026-09-11.log"}` |
 
 All responses are `application/json`.
@@ -203,7 +206,7 @@ are cached 4s and run concurrently.
 {
   "now": 1788996848430,
   "host": {
-    "hostname": "bfd1", "version": "1.3.0", "platform": "linux",
+    "hostname": "bbsfw-01", "version": "1.3.0", "platform": "linux",
     "osUptimeSec": 3681, "procUptimeSec": 135,
     "loadavg": [0.04, 0.04, 0.01],
     "cpu": { "percent": 2, "cores": 1, "model": "Intel Xeon …" },
@@ -361,11 +364,52 @@ just the last 512 KB (rounded down to a whole line), never the whole file. `prox
 itself writes — anything else (a path-traversal attempt, a mismatched proxy/file pair, a
 name that never existed) is `400`; a well-formed name that isn't on disk is `404`.
 
+Every `/api/logs/view` response also carries `start`/`end` (byte offsets of the returned
+chunk), `atStart`, and `firstLine` (1-based line number of the first returned line; `null`
+when the file is over 64 MB and counting would be too slow). Optional paging, at most one
+per request:
+
+| Param | Returns |
+|---|---|
+| `before=<byte>` | The up-to-512 KB chunk ending at that offset (use a previous response's `start` to page backwards) |
+| `after=<byte>` | Complete new lines from that offset to EOF, up to 512 KB (use `end` to follow a growing file; a half-written last line waits for the next call; `reset: true` means the file got smaller — reload) |
+| `line=<n>` | About 150 lines either side of line `n`, plus `targetLine` (what a search hit opens) |
+
+`GET /api/logs/download?proxy=telnet&file=telnet-2026-09-11.log` streams the whole file with
+`Content-Disposition: attachment` — no size cap. Same filename validation as `view`.
+
+`GET /api/logs/download-all` streams every file `GET /api/logs` lists as one standard
+DEFLATE `.zip` (`bbsfirewall-logs-<hostname>-<date>.zip`, entries named `<proxy>/<file>`).
+`404` if there are no log files, `413` if they total more than 3.5 GB (no ZIP64 — download
+individually instead), `429` if two zip downloads are already running. Files are read and
+compressed one at a time as the response is sent; nothing is buffered in memory.
+
 `POST /api/logs/delete {"proxy":"telnet","file":"telnet-2026-09-11.log"}`:
 
 ```json
 { "ok": true, "proxy": "telnet", "file": "telnet-2026-09-11.log" }
 ```
+
+`GET /api/logs/search?q=203.0.113.9%20-debug&proxy=telnet&level=BLOCKED&from=2026-09-01&to=2026-09-30`:
+
+```json
+{ "terms": {"include": ["203.0.113.9"], "exclude": ["debug"]},
+  "matches": [ {"proxy": "telnet", "file": "telnet-2026-09-28.log", "date": "2026-09-28",
+                "line": 42, "text": "[2026-09-28T01:00:00.000Z] [BLOCKED] ..."} ],
+  "totalMatches": 1, "filesScanned": 3, "filesTotal": 3, "bytesScanned": 91234,
+  "limit": 500, "limitReached": false, "bytesCapReached": false, "ms": 12 }
+```
+
+Query syntax (case-insensitive, plain text — no regex): every bare word must appear in the
+line; `"a quoted phrase"` must appear as-is; a leading `-` excludes (`-debug`,
+`-"rate limit"`). `level` is one of `BLOCKED`, `ERROR`, `WARN`, `CONNECTION`, `INFO`,
+`DEBUG` and matches the line's level tag, not a word in the message. `from`/`to` are
+inclusive `YYYY-MM-DD` bounds on the file date. At least one of `q` or `level` is
+required (`400` otherwise). Matches come back newest first; `limit` defaults to 500 (max
+2000) and when it bites (`limitReached: true`) you get the newest ones. A single search
+scans at most 256 MB (`bytesCapReached: true` if it stopped there — narrow the dates or
+type). Files are streamed, never loaded whole. At most two searches run at once
+(`429` otherwise).
 
 Deletion is **permanent** — there is no backup or trash. Deleting a proxy's
 currently-open (today's) file closes its write stream first; the next log line for that

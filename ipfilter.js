@@ -105,6 +105,21 @@ class IPFilter {
     this.blockedIPs = new Map();           // IP -> {blockedUntil, reason} — temporary blocks
     this.activeConnectionsByIP = new Map(); // IP -> active connection count
     this.cleanupInterval = null;
+    this.changeListeners = [];             // notified when the blocked/whitelisted set changes
+  }
+
+  // ufw-blocks.js subscribes here so a new block reaches the kernel within
+  // seconds instead of waiting for its periodic resync. Listeners must be
+  // cheap and non-throwing (they only schedule work); a throw is swallowed
+  // so it can never break a connection-handling path like autoBlockIP.
+  onChange(fn) {
+    this.changeListeners.push(fn);
+  }
+
+  notifyChange() {
+    for (const fn of this.changeListeners) {
+      try { fn(); } catch (_) { /* never let a listener break the caller */ }
+    }
   }
 
   initialize() {
@@ -213,6 +228,7 @@ class IPFilter {
     this.whitelist.clear();
     this.whitelistCidr = [];
     this.loadWhitelist(this.config.whitelistPath);
+    this.notifyChange();
   }
 
   reloadBlocklist() {
@@ -220,6 +236,7 @@ class IPFilter {
     this.blocklist.clear();
     this.blocklistCidr = [];
     this.loadBlocklist(this.config.blocklistPath);
+    this.notifyChange();
   }
 
   loadTriggers(triggerPath) {
@@ -297,7 +314,8 @@ class IPFilter {
     this.autoBlockCount++;
 
     if (tb.mode === 'temp') {
-      this.blockIP(cleanIp, tb.durationMs || 86400000, reason);
+      this.blockIP(cleanIp, tb.durationMs || 86400000, reason, { kernel: true });
+      this.notifyChange();
       return { blocked: true, mode: 'temp' };
     }
 
@@ -319,6 +337,7 @@ class IPFilter {
     }
 
     logger.warn(`Auto-blocked ${cleanIp} (${reason})${persisted ? ' — added to blocklist.txt' : ''}`);
+    if (!already) this.notifyChange();
     return { blocked: true, mode: 'blocklist', persisted };
   }
 
@@ -380,7 +399,10 @@ class IPFilter {
     return false;
   }
 
-  blockIP(ipAddress, durationMs, reason) {
+  // opts.kernel marks a block eligible for the UFW kernel push (ufw-blocks.js).
+  // Only trigger auto-blocks set it — rate-limit blocks are short and hit
+  // ordinary callers who reconnect too fast, so they stay app-level only.
+  blockIP(ipAddress, durationMs, reason, opts) {
     const cleanIp = ipAddress.replace(/^::ffff:/i, '');
     const blockedUntil = Date.now() + durationMs;
 
@@ -388,6 +410,7 @@ class IPFilter {
       blockedUntil,
       reason,
       blockedAt: Date.now(),
+      kernel: !!(opts && opts.kernel),
     });
 
     const durationMin = Math.round(durationMs / 60000);
@@ -495,6 +518,23 @@ class IPFilter {
         logger.debug(`Unblocked IP ${ip} (temporary block expired)`);
       }
     }
+  }
+
+  // Everything ufw-blocks.js needs to compute the kernel block set, in one
+  // snapshot. `permanent` is blocklist order (Set insertion order = file
+  // order, with auto-blocks appended at the end), so its tail is the newest.
+  getKernelBlockSnapshot() {
+    const now = Date.now();
+    const temp = [];
+    for (const [ip, info] of this.blockedIPs) {
+      if (info.kernel && info.blockedUntil > now) temp.push({ ip, until: info.blockedUntil });
+    }
+    return {
+      permanentIps: [...this.blocklist],
+      permanentCidrs: [...this.blocklistCidr],
+      temp,
+      whitelist: [...this.whitelist, ...this.whitelistCidr],
+    };
   }
 
   getStats() {

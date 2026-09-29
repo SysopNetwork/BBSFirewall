@@ -105,18 +105,48 @@ function getCurrentVersion(appDir) {
   }
 }
 
+// "v1.5.0-beta.2" -> { core: [1,5,0], pre: ["beta", 2] }. The pre-release
+// tag must be split off BEFORE splitting on dots — splitting the whole string
+// on dots read "1.5.0-beta.1" as 1.5.0.1, i.e. NEWER than 1.5.0, so a box on
+// a beta would never have been offered the final release.
 function normalizeVersion(v) {
-  return String(v || '').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const s = String(v || '').trim().replace(/^v/i, '');
+  const dash = s.indexOf('-');
+  const coreStr = dash === -1 ? s : s.slice(0, dash);
+  const preStr = dash === -1 ? '' : s.slice(dash + 1);
+  return {
+    core: coreStr.split('.').map((n) => parseInt(n, 10) || 0),
+    pre: preStr ? preStr.split('.').map((p) => (/^\d+$/.test(p) ? parseInt(p, 10) : p)) : [],
+  };
 }
 
+// Semver-style ordering: core numbers first; on a tie a pre-release sorts
+// BEFORE its release (1.5.0-beta.1 < 1.5.0); pre-release identifiers compare
+// numerically when both are numbers, otherwise as text.
 function compareVersions(a, b) {
   const pa = normalizeVersion(a);
   const pb = normalizeVersion(b);
-  const len = Math.max(pa.length, pb.length);
+  const len = Math.max(pa.core.length, pb.core.length);
   for (let i = 0; i < len; i++) {
-    const na = pa[i] || 0;
-    const nb = pb[i] || 0;
+    const na = pa.core[i] || 0;
+    const nb = pb.core[i] || 0;
     if (na !== nb) return na < nb ? -1 : 1;
+  }
+  if (!pa.pre.length || !pb.pre.length) {
+    if (pa.pre.length === pb.pre.length) return 0;
+    return pa.pre.length ? -1 : 1;
+  }
+  const plen = Math.max(pa.pre.length, pb.pre.length);
+  for (let i = 0; i < plen; i++) {
+    const x = pa.pre[i];
+    const y = pb.pre[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    if (typeof x === 'number' && typeof y === 'number') return x < y ? -1 : 1;
+    if (typeof x === 'number') return -1;
+    if (typeof y === 'number') return 1;
+    return x < y ? -1 : 1;
   }
   return 0;
 }

@@ -34,6 +34,7 @@ function toolsIcon(name) {
     lock: '<rect x="4.5" y="9" width="11" height="8" rx="1.5"/><path d="M6.5 9V6.5a3.5 3.5 0 017 0V9"/>',
     refresh: '<path d="M4 10a6 6 0 0110-4.2M16 10a6 6 0 01-10 4.2"/><path d="M14 3v3h-3M6 17v-3h3"/>',
     power: '<path d="M10 4v6"/><path d="M6 6.2a6.3 6.3 0 1 0 8 0"/>',
+    shield: '<path d="M10 2.5l6 2.2v4.8c0 4-2.5 7-6 8-3.5-1-6-4-6-8V4.7z"/>',
   };
   return '<svg class="icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (paths[name] || '') + '</svg>';
@@ -135,9 +136,12 @@ const BASE_CSS = `
     background: var(--bg-input); border: 1px solid var(--border-2); border-radius: 7px; padding: 12px 14px;
     display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
   label { display: block; font-weight: 600; margin-bottom: 4px; color: var(--text-label); }
-  input[type=text], input[type=password], input[type=number], textarea, select {
+  input[type=text], input[type=password], input[type=number], input[type=date], textarea, select {
     width: 100%; padding: 8px 10px; background: var(--bg-input); color: var(--text-input);
     border: 1px solid var(--border-3); border-radius: 6px; font: inherit; }
+  /* Native date picker icon + popup follow the active theme. */
+  input[type=date] { color-scheme: dark; }
+  :root[data-theme="light"] input[type=date] { color-scheme: light; }
   input:disabled, textarea:disabled, select:disabled { opacity: 0.45; }
   textarea { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
   button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 7px;
@@ -218,6 +222,46 @@ const BASE_CSS = `
   .modal { background: var(--bg-card); border: 1px solid var(--border-3); border-radius: 12px; padding: 22px;
     max-width: 440px; width: calc(100% - 40px); height: fit-content; max-height: calc(100vh - 80px); overflow-y: auto; }
   .logtable-wrap { overflow-x: auto; }
+  .logtable.logfiles { table-layout: fixed; min-width: 620px; }
+  .logtable.logfiles col.c-file { width: auto; }
+  .logtable.logfiles col.c-size { width: 90px; }
+  .logtable.logfiles col.c-mod { width: 200px; }
+  .logtable.logfiles col.c-act { width: 220px; }
+  .logtable.logfiles td { overflow: hidden; text-overflow: ellipsis; }
+  .logtable.logfiles td.c-act { text-align: right; }
+  .logsearch-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto auto;
+    gap: 10px 12px; align-items: end; }
+  .logsearch-form .field { margin: 0; min-width: 0; }
+  .logsearch-form .grow { grid-column: 1 / -1; }
+  .logsearch-form input, .logsearch-form select { width: 100%; height: 38px; }
+  .logsearch-form button { height: 38px; }
+  @media (max-width: 720px) {
+    .logsearch-form { grid-template-columns: 1fr 1fr; }
+  }
+  .logsearch-results { max-height: 520px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  .logsearch-hit { padding: 2px 0; border-bottom: 1px solid var(--border); }
+  .logsearch-hit:last-child { border-bottom: 0; }
+  .logsearch-src { color: var(--text-dim); cursor: pointer; text-decoration: underline dotted; margin-right: 8px; }
+  .logsearch-src:hover { color: var(--text); }
+  mark.loghl { background: var(--warn-bg); color: var(--warn-text); border-radius: 2px; padding: 0 1px; }
+  .logview-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .logview-filter input[type=text] { flex: 1 1 240px; }
+  .lv-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .lv-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 2px 8px;
+    border: 1px solid var(--border); border-radius: 12px; cursor: pointer; user-select: none; }
+  .lv-chip input { margin: 0; }
+  .lv-follow { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+  .console.logview { max-height: 560px; white-space: normal; padding: 6px 0; }
+  .lv-row { display: flex; gap: 10px; padding: 0 12px; }
+  .lv-row:hover { background: var(--bg-hover, rgba(127,127,127,.08)); }
+  .lv-n { flex: 0 0 auto; min-width: 5ch; text-align: right; color: var(--text-dim); user-select: none; }
+  .lv-t { flex: 1 1 auto; white-space: pre-wrap; word-break: break-all; }
+  .lv-BLOCKED .lv-t, .lv-ERROR .lv-t { color: var(--danger-text); }
+  .lv-WARN .lv-t { color: var(--warn-text); }
+  .lv-CONNECTION .lv-t { color: var(--ok-text); }
+  .lv-DEBUG .lv-t { color: var(--text-dim); }
+  .lv-target { background: var(--warn-bg); outline: 1px solid var(--warn-border); }
+  .lv-more { display: flex; justify-content: center; padding: 4px 0; }
   .logtable { width: 100%; border-collapse: collapse; font-size: 13px; }
   .logtable th, .logtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .logtable th { color: var(--text-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -590,6 +634,39 @@ function appPage(opts = {}) {
       </div>
     </div>
 
+    <div class="card hidden" id="tools-ufw-card">
+      <h3 style="margin-top:0">${toolsIcon('shield')}Host firewall (UFW)</h3>
+      <div class="kv" id="ufw-kv"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-ufw-preview">Preview changes</button>
+        <button class="danger" id="btn-ufw-apply" disabled>Apply changes</button>
+      </div>
+      <div class="help muted">Preview is read-only. Apply requires typing "APPLY" to confirm, and
+        always re-checks the live state first — nothing here ever runs automatically. Enable it in
+        Settings &gt; Host Firewall (UFW). Global Admin only.</div>
+      <div id="ufw-diff-out" class="hidden" style="margin-top:12px"></div>
+      <hr style="border-color:var(--border);margin:18px 0">
+      <div style="font-weight:600;margin-bottom:6px">Kernel block push</div>
+      <div class="kv" id="ufw-blocks-kv"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-ufw-blocks-refresh">Refresh status</button>
+        <button id="btn-ufw-blocks-sync">Sync now</button>
+        <button class="danger" id="btn-ufw-blocks-remove">Remove pushed rules</button>
+      </div>
+      <div class="help muted">Blocklist entries and trigger auto-blocks mirrored into ufw as
+        <code>deny from</code> rules (tagged <code>bbsfw-auto</code>). Syncs automatically when
+        blocks change; "Sync now" just runs that early. Enable it in Settings &gt; Host Firewall (UFW).</div>
+      <div id="ufw-blocks-out" style="margin-top:12px"></div>
+      <hr style="border-color:var(--border);margin:18px 0">
+      <div class="row">
+        <button id="btn-ufw-log">View recent blocks</button>
+      </div>
+      <div class="help muted">Connections ufw drops at the kernel level never reach BBSFirewall, so
+        they would otherwise be invisible here too — this reads the last part of the host's own
+        <code>/var/log/ufw.log</code>, unmodified.</div>
+      <div id="ufw-log-out" class="console hidden" style="margin-top:12px"></div>
+    </div>
+
     <div class="card hidden" id="tools-reboot-card">
       <h3 style="margin-top:0">${toolsIcon('power')}Danger zone — full server reboot</h3>
       <div class="kv" id="reboot-kv"></div>
@@ -627,9 +704,37 @@ function appPage(opts = {}) {
 
   <div id="tab-logs" class="hidden">
     <div class="card">
+      <h3 style="margin-top:0">Search logs</h3>
+      <form class="logsearch-form" id="logsearch-form" autocomplete="off">
+        <div class="field grow"><label for="logsearch-q">Search for</label>
+          <input id="logsearch-q" type="text" placeholder='e.g. 203.0.113.9   "rate limit"   -debug'></div>
+        <div class="field"><label for="logsearch-proxy">Type</label>
+          <select id="logsearch-proxy"><option value="">All</option></select></div>
+        <div class="field"><label for="logsearch-level">Level</label>
+          <select id="logsearch-level">
+            <option value="">Any</option><option value="BLOCKED">Blocked</option><option value="ERROR">Error</option>
+            <option value="WARN">Warn</option><option value="CONNECTION">Connection</option>
+            <option value="INFO">Info</option><option value="DEBUG">Debug</option>
+          </select></div>
+        <div class="field"><label for="logsearch-from">From</label><input id="logsearch-from" type="date"></div>
+        <div class="field"><label for="logsearch-to">To</label><input id="logsearch-to" type="date"></div>
+        <button type="submit" id="logsearch-go">Search</button>
+        <button type="button" id="logsearch-clear">Clear</button>
+      </form>
+      <div class="help muted">Every word must appear in the line (any case). Use "quotes" for an exact phrase and
+        a leading minus to exclude (<code>-debug</code>). Newest matches first. Click a file name to open it at that line.</div>
+      <div class="row" style="margin-top:10px">
+        <div class="help muted" id="logsearch-meta" style="margin:0"></div>
+        <span class="spacer"></span>
+        <button class="small hidden" id="logsearch-download" type="button">Download results</button>
+      </div>
+      <div class="console logsearch-results hidden" id="logsearch-out"></div>
+    </div>
+    <div class="card">
       <div class="row">
         <h3 style="margin:0">Log files</h3>
         <span class="spacer"></span>
+        <button class="small hidden" id="logs-download-all">Download all (.zip)</button>
         <button class="small" id="logs-refresh">Refresh</button>
       </div>
       <div class="help muted" id="logs-note" style="margin-top:8px"></div>
@@ -639,10 +744,19 @@ function appPage(opts = {}) {
       <div class="row">
         <h3 style="margin:0" id="logs-view-title">Log file</h3>
         <span class="spacer"></span>
+        <button class="small" id="logs-view-download">Download</button>
         <button class="small" id="logs-view-close">Close</button>
       </div>
       <div class="help muted" id="logs-view-meta"></div>
-      <div class="console" id="logs-view-content"></div>
+      <div class="logview-filter">
+        <input id="logs-view-filter" type="text" placeholder="Filter these lines (same syntax as search)" autocomplete="off">
+        <span class="lv-chips" id="logs-view-levels"></span>
+        <label class="lv-follow hidden" id="logs-view-follow-wrap"><input type="checkbox" id="logs-view-follow"> Follow (live)</label>
+        <span class="muted" id="logs-view-count"></span>
+      </div>
+      <div class="lv-more hidden" id="logs-view-older-wrap"><button class="small" id="logs-view-older">Load older lines</button></div>
+      <div class="console logview" id="logs-view-content"></div>
+      <div class="lv-more hidden" id="logs-view-newer-wrap"><button class="small" id="logs-view-newer">Load newer lines</button></div>
     </div>
   </div>
 
@@ -693,6 +807,7 @@ const ICONS = {
   refresh: svgIcon('<path d="M4 10a6 6 0 0110-4.2M16 10a6 6 0 01-10 4.2"/><path d="M14 3v3h-3M6 17v-3h3"/>'),
   sun: svgIcon('<circle cx="10" cy="10" r="4"/><path d="M10 2.5v2.5M10 15v2.5M3.5 3.5l1.8 1.8M14.7 14.7l1.8 1.8M2.5 10h2.5M15 10h2.5M3.5 16.5l1.8-1.8M14.7 5.3l1.8-1.8"/>'),
   moon: svgIcon('<path d="M16.2 12.3A6.8 6.8 0 117.7 3.8a5.3 5.3 0 008.5 8.5z"/>'),
+  shield: svgIcon('<path d="M10 2.5l6 2.2v4.8c0 4-2.5 7-6 8-3.5-1-6-4-6-8V4.7z"/>'),
 };
 
 const HINTS = {
@@ -1026,6 +1141,279 @@ function renderRebootKv(h) {
       : "");
 }
 
+// Reads a Settings-tab field's current submitted value straight out of DATA
+// (not a live API call) - used for cheap "is this feature on" checks that
+// don't need to hit the server, like whether to enable the UFW Preview
+// button. Returns "" for a disabled/missing/unknown field.
+function schemaFieldValue(key) {
+  for (const sec of (DATA && DATA.sections) || []) {
+    const f = sec.fields.find((f) => f.key === key);
+    if (f) return f.enabled ? f.value : "";
+  }
+  return "";
+}
+
+function renderUfwKv() {
+  const kv = $("#ufw-kv");
+  if (!kv) return;
+  const enabled = schemaFieldValue("UFW_ENABLED") === "true";
+  $("#ufw-diff-out").classList.add("hidden");
+  $("#ufw-log-out").classList.add("hidden");
+  if (!enabled) {
+    kv.innerHTML = "<div class='muted'>Disabled. Turn on \\"Enable UFW rule management\\" in " +
+      "Settings &gt; Host Firewall (UFW) (and set the Admin SSH port) to use this.</div>";
+    $("#btn-ufw-preview").disabled = true;
+    $("#btn-ufw-log").disabled = true;
+    // Pushed rules can outlive UFW_ENABLED being turned off - still show them.
+    refreshUfwBlocks();
+    return;
+  }
+  $("#btn-ufw-preview").disabled = false;
+  $("#btn-ufw-log").disabled = false;
+  kv.innerHTML = "<div class='muted'>Click Preview to check the current state - this reads live " +
+    "from the host, nothing is cached.</div>";
+  refreshUfwBlocks();
+}
+
+/* ---- kernel block push (ufw-blocks.js) ---- */
+
+function kvLine(label, value) {
+  return "<div><b>" + esc(label) + "</b><span>" + esc(value) + "</span></div>";
+}
+
+function renderUfwBlocks(d) {
+  const kv = $("#ufw-blocks-kv");
+  const out = $("#ufw-blocks-out");
+  let rows = kvLine("Status", d.enabled ? "On" : "Off");
+  if (d.available === false) rows += kvLine("ufw", "not installed");
+  else if (d.ufwActive === false) rows += kvLine("ufw", "installed but not enabled");
+  if (typeof d.pushedNow === "number") rows += kvLine("Rules in ufw now", String(d.pushedNow));
+  if (d.running && d.progress) rows += kvLine("Syncing", d.progress.done + " / " + d.progress.total + " changes");
+  const last = d.last;
+  if (last) {
+    rows += kvLine("Last sync", fmtDate(last.at) + (last.ok ? "" : " (with problems)"));
+    if (!last.error) {
+      rows += kvLine("Last changes", "+" + last.added + " added, -" + last.removed + " removed");
+      rows += kvLine("Wanted", last.desired + " of max " + d.maxRules);
+    }
+  }
+  kv.innerHTML = rows;
+
+  let html = "";
+  if (last && last.error) html += "<div class='notice err'>" + esc(last.error) + "</div>";
+  if (last && last.errors && last.errors.length) {
+    html += "<div class='notice err'>" + last.errors.length + " ufw command(s) failed:<br>" +
+      last.errors.map(esc).join("<br>") + "</div>";
+  }
+  if (last && last.skippedOverCap) {
+    html += "<div class='notice warn'>" + last.skippedOverCap + " block(s) not pushed - over the " + d.maxRules +
+      "-rule limit. BBSFirewall still blocks them itself; raise Max pushed block rules to push more.</div>";
+  }
+  if (last && last.skippedIpv6) {
+    html += "<div class='notice warn'>" + last.skippedIpv6 + " IPv6 block(s) not pushed - this host's ufw has IPv6 disabled.</div>";
+  }
+  if (last && last.skippedProtected && last.skippedProtected.length) {
+    html += "<div class='notice warn'>Never pushed, to protect your own access:<br>" +
+      last.skippedProtected.map((p) => esc(p.source) + " - " + esc(p.reason)).join("<br>") + "</div>";
+  }
+  if (!d.enabled && d.pushedNow) {
+    html += "<div class='notice warn'>Block push is off, but " + d.pushedNow + " previously pushed rule(s) are still " +
+      "in ufw and still blocking. Use Remove pushed rules to clear them.</div>";
+  }
+  out.innerHTML = html;
+
+  $("#btn-ufw-blocks-sync").disabled = !d.enabled || !!d.running;
+  $("#btn-ufw-blocks-remove").disabled = !!d.enabled || !d.pushedNow;
+}
+
+let ufwBlocksPoll = null;
+async function refreshUfwBlocks() {
+  const kv = $("#ufw-blocks-kv");
+  if (!kv) return;
+  if (ufwBlocksPoll) { clearTimeout(ufwBlocksPoll); ufwBlocksPoll = null; }
+  try {
+    const res = await fetch("api/ufw/blocks", { headers: { "X-CSRF-Token": CSRF } });
+    if (res.status === 401) { location.href = "login"; return; }
+    const d = await res.json();
+    if (!res.ok || d.error) { $("#ufw-blocks-out").innerHTML = "<div class='notice err'>" + esc(d.error || ("HTTP " + res.status)) + "</div>"; return; }
+    renderUfwBlocks(d);
+    // A first sync of a big blocklist can take a while - keep the progress live.
+    if (d.running) ufwBlocksPoll = setTimeout(refreshUfwBlocks, 2000);
+  } catch (e) {
+    $("#ufw-blocks-out").innerHTML = "<div class='notice err'>Request failed: " + esc(e.message) + "</div>";
+  }
+}
+
+async function runUfwBlocksSync() {
+  $("#btn-ufw-blocks-sync").disabled = true;
+  const r = await api("api/ufw/blocks/sync", {});
+  const d = r.data || {};
+  if (!r.ok) notice("err", d.error || "Sync failed.");
+  // The server runs the sync in the background; poll for its progress.
+  setTimeout(refreshUfwBlocks, 500);
+}
+
+function confirmUfwBlocksRemove() {
+  modalOpen(
+    '<h3 style="margin-top:0">Remove pushed block rules?</h3>' +
+    '<p class="muted">Deletes every <code>bbsfw-auto</code> rule from ufw. Those addresses are still blocked by ' +
+    "BBSFirewall itself if they are on the Blocklist - only the kernel-level copy goes away.</p>" +
+    '<div class="field"><label for="ufwb-confirm-input">Type <b>REMOVE</b> to confirm</label>' +
+    '<input id="ufwb-confirm-input" type="text" autocomplete="off"></div>' +
+    '<div id="ufwb-modal-notice"></div>' +
+    '<div class="row" style="margin-top:18px;justify-content:flex-end">' +
+    '<button id="ufwb-cancel" type="button">Cancel</button>' +
+    '<button class="danger" id="ufwb-go" type="button" disabled>Remove</button></div>'
+  );
+  const input = $("#ufwb-confirm-input");
+  const goBtn = $("#ufwb-go");
+  input.addEventListener("input", () => { goBtn.disabled = input.value !== "REMOVE"; });
+  $("#ufwb-cancel").addEventListener("click", () => ($("#modal-root").innerHTML = ""));
+  goBtn.addEventListener("click", async () => {
+    goBtn.disabled = true;
+    goBtn.textContent = "Removing...";
+    const r = await api("api/ufw/blocks/remove", { confirm: input.value });
+    const d = r.data || {};
+    if (!r.ok || d.error) {
+      const mn = $("#ufwb-modal-notice");
+      if (mn) mn.innerHTML = '<div class="notice err">' + esc(d.error || "Remove failed.") + "</div>";
+      goBtn.disabled = false;
+      goBtn.textContent = "Remove";
+      return;
+    }
+    $("#modal-root").innerHTML = "";
+    notice(d.ok ? "ok" : "err", "Removed " + d.removed + " rule(s)" +
+      (d.errors && d.errors.length ? "; " + d.errors.length + " failed: " + d.errors.join("; ") : "."));
+    refreshUfwBlocks();
+  });
+}
+
+$("#btn-ufw-blocks-refresh").addEventListener("click", refreshUfwBlocks);
+$("#btn-ufw-blocks-sync").addEventListener("click", runUfwBlocksSync);
+$("#btn-ufw-blocks-remove").addEventListener("click", confirmUfwBlocksRemove);
+
+function ufwRuleLine(r) {
+  return "<div class='console' style='margin:0 0 4px;padding:6px 10px'>" +
+    esc(r.action) + " " + esc(r.to) + (r.ipv6 ? " (v6)" : "") + " from " + esc(r.from) + "</div>";
+}
+
+// Only ever used to decide whether to SHOW the Apply button as enabled - the
+// server recomputes everything fresh from live state when Apply is actually
+// clicked (see computeUfwState()'s own comment), so a stale value here can't
+// cause a stale apply, only a stale button state that a re-click of Preview
+// fixes.
+let lastUfwHadChanges = false;
+
+async function runUfwPreview() {
+  const btn = $("#btn-ufw-preview");
+  const applyBtn = $("#btn-ufw-apply");
+  const out = $("#ufw-diff-out");
+  btn.disabled = true;
+  applyBtn.disabled = true;
+  lastUfwHadChanges = false;
+  out.classList.remove("hidden");
+  out.innerHTML = "<div class='muted'>Checking...</div>";
+  try {
+    const res = await fetch("api/ufw/preview", { headers: { "X-CSRF-Token": CSRF } });
+    if (res.status === 401) { location.href = "login"; return; }
+    const d = await res.json();
+    if (!res.ok || d.error) {
+      out.innerHTML = "<div class='notice err'>" + esc(d.error || ("HTTP " + res.status)) + "</div>";
+      return;
+    }
+    const ipv6Note = d.ipv6Supported === false
+      ? "<div class='notice warn'>This host's ufw has IPv6 support disabled (IPV6=yes is not set in " +
+        "/etc/default/ufw) - IPv6 rules are skipped entirely rather than added and left unenforced.</div>"
+      : "";
+    if (d.inSync) {
+      out.innerHTML = ipv6Note + "<div class='notice ok'>In sync - " + d.current.length + " BBSFirewall-managed rule(s), no changes needed.</div>";
+      return;
+    }
+    let html = ipv6Note;
+    if (d.adminRuleOk === false) {
+      html += "<div class='notice err'>The admin SSH port (" + esc(d.adminSshPort) +
+        ") would end up with NO allow/limit rule - check Trusted Hosts is not empty. Apply is blocked until this is fixed.</div>";
+    }
+    html += "<div class='notice warn'>" + (d.diff.toAdd.length + d.diff.toRemove.length) + " change(s) would apply.</div>";
+    if (d.diff.toAdd.length) {
+      html += "<div style='font-weight:600;margin:8px 0 4px'>Would add</div>" + d.diff.toAdd.map(ufwRuleLine).join("");
+    }
+    if (d.diff.toRemove.length) {
+      html += "<div style='font-weight:600;margin:8px 0 4px'>Would remove</div>" + d.diff.toRemove.map(ufwRuleLine).join("");
+    }
+    out.innerHTML = html;
+    lastUfwHadChanges = d.adminRuleOk !== false;
+    applyBtn.disabled = !lastUfwHadChanges;
+  } catch (e) {
+    out.innerHTML = "<div class='notice err'>Request failed: " + esc(e.message) + "</div>";
+  } finally {
+    btn.disabled = false;
+  }
+}
+const btnUfwPreview = $("#btn-ufw-preview");
+if (btnUfwPreview) btnUfwPreview.addEventListener("click", runUfwPreview);
+
+function confirmUfwApply() {
+  modalOpen(
+    '<h3 style="margin-top:0">Apply UFW changes?</h3>' +
+    '<p class="muted">This changes the live firewall rules on this host right now. The admin SSH ' +
+    "port is protected by a server-side safety check, but review the diff above before confirming - " +
+    "this is not reversible with a click.</p>" +
+    '<div class="field"><label for="ufw-confirm-input">Type <b>APPLY</b> to confirm</label>' +
+    '<input id="ufw-confirm-input" type="text" autocomplete="off"></div>' +
+    '<div id="ufw-modal-notice"></div>' +
+    '<div class="row" style="margin-top:18px;justify-content:flex-end">' +
+    '<button id="ufw-cancel" type="button">Cancel</button>' +
+    '<button class="danger" id="ufw-go" type="button" disabled>Apply now</button></div>'
+  );
+  const input = $("#ufw-confirm-input");
+  const goBtn = $("#ufw-go");
+  input.addEventListener("input", () => { goBtn.disabled = input.value !== "APPLY"; });
+  $("#ufw-cancel").addEventListener("click", () => ($("#modal-root").innerHTML = ""));
+  goBtn.addEventListener("click", async () => {
+    goBtn.disabled = true;
+    const r = await api("api/ufw/apply", { confirm: input.value });
+    const d = r.data || {};
+    if (!(r.ok && d.ok)) {
+      const mn = $("#ufw-modal-notice");
+      if (mn) mn.innerHTML = '<div class="notice err">' + esc(d.error || "Apply failed.") + "</div>";
+      goBtn.disabled = false;
+      return;
+    }
+    $("#modal-root").innerHTML = "";
+    notice("ok", d.applied ? "UFW rules updated." : (d.message || "Nothing to apply."));
+    runUfwPreview();
+  });
+}
+const btnUfwApply = $("#btn-ufw-apply");
+if (btnUfwApply) btnUfwApply.addEventListener("click", () => { if (lastUfwHadChanges) confirmUfwApply(); });
+
+async function runUfwLog() {
+  const btn = $("#btn-ufw-log");
+  const out = $("#ufw-log-out");
+  btn.disabled = true;
+  out.classList.remove("hidden");
+  out.textContent = "Loading...";
+  try {
+    const res = await fetch("api/ufw/log", { headers: { "X-CSRF-Token": CSRF } });
+    if (res.status === 401) { location.href = "login"; return; }
+    const d = await res.json();
+    if (!res.ok || d.error) {
+      out.textContent = d.error || ("HTTP " + res.status);
+    } else if (!d.exists) {
+      out.textContent = "No /var/log/ufw.log found on this host - nothing logged yet, or ufw logging is off.";
+    } else {
+      out.textContent = (d.truncated ? "(showing the most recent part only)\\n\\n" : "") + (d.content.trim() || "(empty)");
+    }
+  } catch (e) {
+    out.textContent = "Request failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+const btnUfwLog = $("#btn-ufw-log");
+if (btnUfwLog) btnUfwLog.addEventListener("click", runUfwLog);
+
 async function runTool(btn, outSel, url, body) {
   const out = $(outSel);
   out.classList.remove("hidden");
@@ -1305,11 +1693,12 @@ const LOG_RECENT_DAYS = 30;
 
 // Reuses the same icon language as the Settings sections (network = telnet,
 // terminal = SSH, redirect = web redirect, file = generic/fallback).
-const LOG_TYPE_ICONS = { telnet: "network", ssh: "terminal", "ssh-passthrough": "terminal", web: "redirect" };
+const LOG_TYPE_ICONS = { telnet: "network", ssh: "terminal", "ssh-passthrough": "terminal", web: "redirect", ufw: "shield" };
 
 // Plain display names for the raw proxy/folder names, same "label by name, not
 // filename" convention as the Lists tab sections.
-const LOG_TYPE_LABELS = { telnet: "Telnet", ssh: "SSH", "ssh-passthrough": "SSH Passthrough", web: "Web Redirect" };
+const LOG_TYPE_LABELS = { telnet: "Telnet", ssh: "SSH", "ssh-passthrough": "SSH Passthrough", web: "Web Redirect",
+  ufw: "Host Firewall (UFW)", "config-editor": "Config Editor" };
 function logTypeLabel(proxy) { return LOG_TYPE_LABELS[proxy] || proxy; }
 
 function monthLabel(monthKey) {
@@ -1348,15 +1737,18 @@ function groupLogFiles(files) {
 }
 
 function logRow(f) {
-  return "<tr><td>" + esc(f.file) + "</td><td>" + esc(fmtBytes(f.size)) + "</td><td>" + esc(fmtDate(f.mtime)) + "</td><td>" +
+  return '<tr><td title="' + esc(f.file) + '">' + esc(f.file) + "</td><td>" + esc(fmtBytes(f.size)) + "</td><td>" + esc(fmtDate(f.mtime)) + '</td><td class="c-act">' +
     '<button class="small" data-log-view data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">View</button> ' +
+    '<button class="small" data-log-dl data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">Download</button> ' +
     '<button class="small danger" data-log-del data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">Delete</button>' +
     "</td></tr>";
 }
 
 function logTable(list) {
   if (!list.length) return "";
-  return '<div class="logtable-wrap"><table class="logtable"><thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead>' +
+  return '<div class="logtable-wrap"><table class="logtable logfiles">' +
+    '<colgroup><col class="c-file"><col class="c-size"><col class="c-mod"><col class="c-act"></colgroup>' +
+    "<thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead>" +
     "<tbody>" + list.map(logRow).join("") + "</tbody></table></div>";
 }
 
@@ -1411,23 +1803,334 @@ async function refreshLogs() {
     : "File logging is currently off (LOG_FILE_ENABLED in Settings) — no new files are being written. Existing files below can still be viewed or deleted.")
     + stats;
   renderLogsTable(files);
+  fillLogSearchTypes(files);
+  $("#logs-download-all").classList.toggle("hidden", !files.length);
 }
 
-async function viewLogFile(proxy, file) {
+function fillLogSearchTypes(files) {
+  const sel = $("#logsearch-proxy");
+  const current = sel.value;
+  const types = [...new Set(files.map((f) => f.proxy))].sort();
+  sel.innerHTML = '<option value="">All</option>' +
+    types.map((t) => '<option value="' + esc(t) + '">' + esc(logTypeLabel(t)) + "</option>").join("");
+  if (types.includes(current)) sel.value = current;
+}
+
+/* ---- search + filter (shared query syntax with file-logger.js parseQuery) ---- */
+
+// No backslash escapes anywhere in this block (character loop instead of a
+// regex, fromCharCode instead of escape sequences): this client code is emitted through a
+// template literal, where escapes are easy to silently corrupt.
+const NL = String.fromCharCode(10);
+const TAB = String.fromCharCode(9);
+function isSpace(ch) { return ch === " " || ch === TAB; }
+function parseLogQuery(q) {
+  const include = [];
+  const exclude = [];
+  const str = String(q || "");
+  let i = 0;
+  while (i < str.length) {
+    while (i < str.length && isSpace(str[i])) i++;
+    if (i >= str.length) break;
+    let neg = false;
+    if (str[i] === "-" && i + 1 < str.length && !isSpace(str[i + 1])) { neg = true; i++; }
+    let term;
+    if (str[i] === '"') {
+      const end = str.indexOf('"', i + 1);
+      term = end === -1 ? str.slice(i + 1) : str.slice(i + 1, end);
+      i = end === -1 ? str.length : end + 1;
+    } else {
+      const start = i;
+      while (i < str.length && !isSpace(str[i])) i++;
+      term = str.slice(start, i);
+    }
+    term = term.toLowerCase();
+    if (term) (neg ? exclude : include).push(term);
+  }
+  return { include, exclude };
+}
+
+function logLineMatches(line, parsed) {
+  const lower = line.toLowerCase();
+  for (const t of parsed.include) if (!lower.includes(t)) return false;
+  for (const t of parsed.exclude) if (lower.includes(t)) return false;
+  return true;
+}
+
+// Escape-then-mark without ever running the terms as a pattern: find every
+// case-insensitive occurrence, merge overlaps, escape each piece separately.
+function highlightTerms(text, terms) {
+  const lower = text.toLowerCase();
+  const ranges = [];
+  for (const t of terms) {
+    if (!t) continue;
+    let at = lower.indexOf(t);
+    while (at !== -1) { ranges.push([at, at + t.length]); at = lower.indexOf(t, at + t.length); }
+  }
+  if (!ranges.length) return esc(text);
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [ranges[0].slice()];
+  for (const r of ranges.slice(1)) {
+    const last = merged[merged.length - 1];
+    if (r[0] <= last[1]) last[1] = Math.max(last[1], r[1]); else merged.push(r.slice());
+  }
+  let out = "";
+  let pos = 0;
+  for (const [a, b] of merged) {
+    out += esc(text.slice(pos, a)) + '<mark class="loghl">' + esc(text.slice(a, b)) + "</mark>";
+    pos = b;
+  }
+  return out + esc(text.slice(pos));
+}
+
+/* ---- file viewer: paged (Load older/newer), live Follow, jump to a line ---- */
+
+const LOG_LEVELS = ["BLOCKED", "ERROR", "WARN", "CONNECTION", "INFO", "DEBUG"];
+const LOG_VIEW_MAX_LINES = 60000; // past this, Download is the better tool
+const LOG_FOLLOW_MS = 3000;
+
+// One open file. lines[i] = { n: line number or null, text }.
+let LV = null;
+let lvFollowTimer = null;
+let lvHiddenLevels = new Set();
+
+// "[2026-09-28T01:00:00.000Z] [BLOCKED] msg" -> "BLOCKED" (or "" if not shaped like ours).
+function lineLevel(text) {
+  const a = text.indexOf("] [");
+  if (a === -1 || a > 40) return "";
+  const b = text.indexOf("]", a + 3);
+  return b === -1 ? "" : text.slice(a + 3, b);
+}
+
+function splitLines(content) {
+  const arr = (content || "").split(NL);
+  if (arr.length && arr[arr.length - 1] === "") arr.pop();
+  return arr;
+}
+
+function toLineObjs(content, firstLine) {
+  return splitLines(content).map((text, i) => ({ n: firstLine ? firstLine + i : null, text }));
+}
+
+function renderLevelChips() {
+  $("#logs-view-levels").innerHTML = LOG_LEVELS.map((lv) =>
+    '<label class="lv-chip lv-' + lv + '"><input type="checkbox" data-lv-level="' + lv + '"' +
+    (lvHiddenLevels.has(lv) ? "" : " checked") + "> " + lv.charAt(0) + lv.slice(1).toLowerCase() + "</label>"
+  ).join("");
+}
+
+function renderLogView(opts) {
+  const el = $("#logs-view-content");
+  if (!LV) { el.innerHTML = ""; return; }
+  const parsed = parseLogQuery($("#logs-view-filter").value);
+  const terms = parsed.include.concat(LV.terms || []);
+  const filtering = parsed.include.length || parsed.exclude.length || lvHiddenLevels.size;
+  const shown = LV.lines.filter((l) => {
+    const lvl = lineLevel(l.text);
+    if (lvl && lvHiddenLevels.has(lvl)) return false;
+    return !(parsed.include.length || parsed.exclude.length) || logLineMatches(l.text, parsed);
+  });
+  const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  const prevHeight = el.scrollHeight;
+  const prevTop = el.scrollTop;
+  el.innerHTML = shown.length
+    ? shown.map((l) => {
+        const lvl = lineLevel(l.text);
+        const target = LV.targetLine && l.n === LV.targetLine;
+        return '<div class="lv-row' + (lvl ? " lv-" + esc(lvl) : "") + (target ? " lv-target" : "") + '"' +
+          (target ? ' id="lv-target-row"' : "") + '><span class="lv-n">' + (l.n || "") + '</span><span class="lv-t">' +
+          highlightTerms(l.text, terms) + "</span></div>";
+      }).join("")
+    : '<div class="lv-row"><span class="lv-t muted">' + (LV.lines.length ? "No lines match." : "(empty)") + "</span></div>";
+  $("#logs-view-count").textContent = filtering
+    ? shown.length + " of " + LV.lines.length + " lines"
+    : LV.lines.length + " lines";
+  $("#logs-view-older-wrap").classList.toggle("hidden", LV.atStart || LV.lines.length >= LOG_VIEW_MAX_LINES);
+  $("#logs-view-newer-wrap").classList.toggle("hidden", LV.end >= LV.size || $("#logs-view-follow").checked);
+
+  const how = (opts && opts.scroll) || "";
+  if (how === "target") {
+    const row = $("#lv-target-row");
+    if (row) el.scrollTop = row.offsetTop - el.clientHeight / 2;
+  } else if (how === "bottom" || (how === "follow" && wasAtBottom)) {
+    el.scrollTop = el.scrollHeight;
+  } else if (how === "keep-after-prepend") {
+    el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
+  }
+}
+
+function updateLogViewMeta() {
+  if (!LV) return;
+  let m = fmtBytes(LV.size);
+  if (!LV.atStart || LV.end < LV.size) m += " — showing part of the file (" + fmtBytes(LV.end - LV.start) + ")";
+  if (LV.lines.length >= LOG_VIEW_MAX_LINES) m += " — use Download for the rest";
+  $("#logs-view-meta").textContent = m;
+}
+
+async function fetchLogView(params) {
+  const r = await fetch("api/logs/view?proxy=" + encodeURIComponent(LV.proxy) + "&file=" + encodeURIComponent(LV.file) + params,
+    { headers: { "X-CSRF-Token": CSRF } });
+  if (r.status === 401) { location.href = "login"; throw new Error("signed out"); }
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+  return d;
+}
+
+function stopFollow() {
+  if (lvFollowTimer) { clearTimeout(lvFollowTimer); lvFollowTimer = null; }
+}
+
+async function followTick() {
+  lvFollowTimer = null;
+  if (!LV || !$("#logs-view-follow").checked || $("#logs-view-card").classList.contains("hidden")) return;
+  const mine = LV;
+  try {
+    const d = await fetchLogView("&after=" + LV.end);
+    if (LV !== mine) return;
+    if (d.reset) { await viewLogFile(LV.proxy, LV.file); return; }
+    LV.size = d.size;
+    if (d.content) {
+      const lastN = LV.lines.length ? LV.lines[LV.lines.length - 1].n : null;
+      LV.lines = LV.lines.concat(toLineObjs(d.content, lastN ? lastN + 1 : null));
+      LV.end = d.end;
+      if (LV.lines.length > LOG_VIEW_MAX_LINES) {
+        LV.lines = LV.lines.slice(LV.lines.length - LOG_VIEW_MAX_LINES);
+        LV.atStart = false; // older lines were dropped from view
+      }
+      renderLogView({ scroll: "follow" });
+      updateLogViewMeta();
+    }
+  } catch (e) {
+    $("#logs-view-meta").textContent = "Follow paused: " + e.message;
+    $("#logs-view-follow").checked = false;
+    return;
+  }
+  lvFollowTimer = setTimeout(followTick, LOG_FOLLOW_MS);
+}
+
+async function loadOlderLogLines() {
+  if (!LV || LV.atStart) return;
+  const btn = $("#logs-view-older");
+  btn.disabled = true;
+  try {
+    const d = await fetchLogView("&before=" + LV.start);
+    LV.lines = toLineObjs(d.content, d.firstLine).concat(LV.lines);
+    LV.start = d.start;
+    LV.atStart = d.atStart;
+    renderLogView({ scroll: "keep-after-prepend" });
+    updateLogViewMeta();
+  } catch (e) {
+    notice("err", "Could not load older lines: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadNewerLogLines() {
+  if (!LV || LV.end >= LV.size) return;
+  const btn = $("#logs-view-newer");
+  btn.disabled = true;
+  try {
+    const d = await fetchLogView("&after=" + LV.end);
+    const lastN = LV.lines.length ? LV.lines[LV.lines.length - 1].n : null;
+    LV.lines = LV.lines.concat(toLineObjs(d.content, lastN ? lastN + 1 : null));
+    LV.end = d.end;
+    LV.size = d.size;
+    renderLogView();
+    updateLogViewMeta();
+  } catch (e) {
+    notice("err", "Could not load newer lines: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function downloadLogFile(proxy, file) {
+  // An attachment response downloads without navigating away from the page.
+  location.href = "api/logs/download?proxy=" + encodeURIComponent(proxy) + "&file=" + encodeURIComponent(file);
+}
+
+function saveTextAs(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+let lastSearchResult = null;
+
+async function runLogSearch() {
+  const params = new URLSearchParams();
+  const q = $("#logsearch-q").value.trim();
+  if (q) params.set("q", q);
+  for (const [k, sel] of [["proxy", "#logsearch-proxy"], ["level", "#logsearch-level"], ["from", "#logsearch-from"], ["to", "#logsearch-to"]]) {
+    if ($(sel).value) params.set(k, $(sel).value);
+  }
+  const out = $("#logsearch-out");
+  const meta = $("#logsearch-meta");
+  const btn = $("#logsearch-go");
+  btn.disabled = true;
+  meta.textContent = "Searching…";
+  out.classList.add("hidden");
+  try {
+    const r = await fetch("api/logs/search?" + params.toString(), { headers: { "X-CSRF-Token": CSRF } });
+    if (r.status === 401) { location.href = "login"; return; }
+    const d = await r.json();
+    if (!r.ok) { meta.innerHTML = '<span class="notice err">' + esc(d.error || ("HTTP " + r.status)) + "</span>"; return; }
+    let m = (d.limitReached ? "Showing the newest " + d.matches.length + " matches (limit " + d.limit + ") — narrow the search to see older ones. "
+      : d.matches.length + " match" + (d.matches.length === 1 ? "" : "es") + ". ") +
+      "Searched " + d.filesScanned + " of " + fileWord(d.filesTotal) + " (" + fmtBytes(d.bytesScanned) + ") in " + (d.ms / 1000).toFixed(1) + "s.";
+    if (d.bytesCapReached) m += " Stopped at the per-search size cap — add a date range or type to reach older files.";
+    meta.textContent = m;
+    lastSearchResult = d.matches.length ? { q, matches: d.matches } : null;
+    $("#logsearch-download").classList.toggle("hidden", !lastSearchResult);
+    if (!d.matches.length) return;
+    const terms = (d.terms && d.terms.include) || [];
+    out.innerHTML = d.matches.map((h) =>
+      '<div class="logsearch-hit"><span class="logsearch-src" data-log-open data-proxy="' + esc(h.proxy) + '" data-file="' + esc(h.file) + '" data-line="' + h.line + '">' +
+      esc(h.file) + ":" + h.line + "</span>" + highlightTerms(h.text, terms) + "</div>"
+    ).join("");
+    out.classList.remove("hidden");
+  } catch (e) {
+    meta.textContent = "Request failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// opts.line: open a window around that line (a search hit) instead of the
+// file's tail; opts.terms: extra words to highlight (the search's terms).
+async function viewLogFile(proxy, file, opts) {
+  stopFollow();
+  const o = opts || {};
   $("#logs-view-card").classList.remove("hidden");
   $("#logs-view-title").textContent = proxy + "/" + file;
   $("#logs-view-meta").textContent = "Loading…";
-  $("#logs-view-content").textContent = "";
+  $("#logs-view-count").textContent = "";
+  $("#logs-view-follow").checked = false;
+  // Follow only makes sense on the file still being written (today, UTC).
+  const today = new Date().toISOString().slice(0, 10);
+  $("#logs-view-follow-wrap").classList.toggle("hidden", file.indexOf(today) === -1);
+  renderLevelChips();
+  LV = { proxy, file, lines: [], start: 0, end: 0, size: 0, atStart: true, targetLine: o.line || null, terms: o.terms || [] };
+  const mine = LV;
+  renderLogView();
   try {
-    const r = await fetch("api/logs/view?proxy=" + encodeURIComponent(proxy) + "&file=" + encodeURIComponent(file),
-      { headers: { "X-CSRF-Token": CSRF } });
-    const d = await r.json();
-    if (!r.ok) { $("#logs-view-meta").textContent = d.error || ("HTTP " + r.status); return; }
-    $("#logs-view-meta").textContent = fmtBytes(d.size) +
-      (d.truncated ? " — file is larger; showing the last " + fmtBytes(512 * 1024) : "");
-    $("#logs-view-content").textContent = d.content || "(empty)";
+    const d = await fetchLogView(o.line ? "&line=" + o.line : "");
+    if (LV !== mine) return; // another file was opened meanwhile
+    LV.lines = toLineObjs(d.content, d.firstLine);
+    LV.start = d.start;
+    LV.end = d.end;
+    LV.size = d.size;
+    LV.atStart = d.atStart;
+    renderLogView({ scroll: o.line ? "target" : "bottom" });
+    updateLogViewMeta();
   } catch (e) {
-    $("#logs-view-meta").textContent = "Request failed: " + e.message;
+    if (LV === mine) $("#logs-view-meta").textContent = "Request failed: " + e.message;
   }
 }
 
@@ -1448,7 +2151,7 @@ function confirmDeleteLog(proxy, file) {
     const d = r.data || {};
     if (r.ok && d.ok) {
       notice("ok", "Deleted " + proxy + "/" + file + ".");
-      if ($("#logs-view-title").textContent === proxy + "/" + file) $("#logs-view-card").classList.add("hidden");
+      if ($("#logs-view-title").textContent === proxy + "/" + file) { stopFollow(); LV = null; $("#logs-view-card").classList.add("hidden"); }
       refreshLogs();
     } else {
       notice("err", d.error || "Delete failed.");
@@ -1458,7 +2161,19 @@ function confirmDeleteLog(proxy, file) {
 
 document.addEventListener("click", (e) => {
   const v = e.target.closest && e.target.closest("[data-log-view]");
-  if (v) { viewLogFile(v.dataset.proxy, v.dataset.file); return; }
+  if (v) { $("#logs-view-filter").value = ""; viewLogFile(v.dataset.proxy, v.dataset.file); return; }
+  const dl = e.target.closest && e.target.closest("[data-log-dl]");
+  if (dl) { downloadLogFile(dl.dataset.proxy, dl.dataset.file); return; }
+  const o = e.target.closest && e.target.closest("[data-log-open]");
+  if (o) {
+    // Open AT the hit with context around it; the search words stay
+    // highlighted but nothing is filtered out, so the surrounding lines show.
+    $("#logs-view-filter").value = "";
+    const terms = parseLogQuery($("#logsearch-q").value).include;
+    $("#logs-view-card").scrollIntoView({ behavior: "smooth" });
+    viewLogFile(o.dataset.proxy, o.dataset.file, { line: parseInt(o.dataset.line, 10), terms });
+    return;
+  }
   const del = e.target.closest && e.target.closest("[data-log-del]");
   if (del) confirmDeleteLog(del.dataset.proxy, del.dataset.file);
 });
@@ -1510,10 +2225,51 @@ async function loadHealth() {
   } catch (e) { /* Tools tab just keeps showing its last-known state */ }
 }
 
-async function load() {
-  const res = await fetch("api/config", { headers: { "X-CSRF-Token": CSRF } });
-  if (res.status === 401) { location.href = "login"; return; }
-  DATA = await res.json();
+// Retries instead of failing once: right after a restart the page can load
+// while the old process is still exiting, so the first /api/config can be
+// refused or cut off — which used to leave an empty page (no settings, no
+// version) until a manual reload.
+const LOAD_MAX_ATTEMPTS = 8;
+
+// fetch() with a time limit. A request on a connection to a process that has
+// already exited can hang for most of a minute when the host firewall drops
+// packets for closed connections; aborting it also discards that connection,
+// so the next attempt opens a fresh one.
+async function fetchWithTimeout(url, opts, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function load(attempt) {
+  const n = attempt || 1;
+  let data = null;
+  let why = "";
+  try {
+    const res = await fetchWithTimeout("api/config", { headers: { "X-CSRF-Token": CSRF }, cache: "no-store" }, 8000);
+    if (res.status === 401) { location.href = "login"; return; }
+    if (res.ok) data = await res.json(); else why = "HTTP " + res.status;
+  } catch (e) {
+    why = e.message;
+  }
+  if (!data) {
+    if (n < LOAD_MAX_ATTEMPTS) {
+      notice("warn", "Waiting for the firewall to answer…");
+      setTimeout(() => load(n + 1), Math.min(750 * n, 4000));
+    } else {
+      notice("err", "Could not load settings (" + why + "). Reload the page to try again.");
+    }
+    return;
+  }
+  if (n > 1) notice("ok", "Connected.");
+  DATA = data;
+  // Version first, so a render problem below can never also hide which build this is.
+  const st0 = DATA.status || {};
+  $("#hdr-ver").textContent = "v" + (st0.version || "?");
   renderSettings();
   renderFiles();
   renderTools();
@@ -1524,6 +2280,8 @@ async function load() {
     " · pm2: " + (st.pm2 ? "available" : "not detected") + " · .env: " + st.envPath;
   updateAddIpButtons();
   $("#tools-reboot-card").classList.toggle("hidden", st.role !== "master_admin");
+  $("#tools-ufw-card").classList.toggle("hidden", st.role !== "master_admin");
+  renderUfwKv();
   renderUpdate();
   loadHealth(); // don't await — Tools-tab data can arrive after the rest of the page
   loadUpdateInfo(); // same — hits GitHub, must not hold up the rest of the page
@@ -1536,6 +2294,8 @@ function activateTab(name) {
   for (const n of TAB_NAMES) $("#tab-" + n).classList.toggle("hidden", n !== name);
   perfLoop(name === "performance" && $("#perf-auto").checked);
   if (name === "logs") refreshLogs();
+  // Don't keep polling a followed log file from another tab.
+  else if ($("#logs-view-follow").checked) { $("#logs-view-follow").checked = false; stopFollow(); }
 }
 $("#tabs").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tab]");
@@ -1625,7 +2385,43 @@ $("#settings-collapse-all").addEventListener("click", () => {
 });
 
 $("#logs-refresh").addEventListener("click", refreshLogs);
-$("#logs-view-close").addEventListener("click", () => $("#logs-view-card").classList.add("hidden"));
+// Attachment response: downloads without leaving the page (see downloadLogFile).
+$("#logs-download-all").addEventListener("click", () => { location.href = "api/logs/download-all"; });
+$("#logsearch-form").addEventListener("submit", (e) => { e.preventDefault(); runLogSearch(); });
+$("#logsearch-clear").addEventListener("click", () => {
+  for (const sel of ["#logsearch-q", "#logsearch-proxy", "#logsearch-level", "#logsearch-from", "#logsearch-to"]) $(sel).value = "";
+  $("#logsearch-meta").textContent = "";
+  $("#logsearch-out").classList.add("hidden");
+  $("#logsearch-download").classList.add("hidden");
+  lastSearchResult = null;
+});
+$("#logs-view-filter").addEventListener("input", () => renderLogView());
+$("#logs-view-close").addEventListener("click", () => { stopFollow(); LV = null; $("#logs-view-card").classList.add("hidden"); });
+$("#logs-view-levels").addEventListener("change", (e) => {
+  const lv = e.target.dataset && e.target.dataset.lvLevel;
+  if (!lv) return;
+  if (e.target.checked) lvHiddenLevels.delete(lv); else lvHiddenLevels.add(lv);
+  renderLogView();
+});
+$("#logs-view-follow").addEventListener("change", (e) => {
+  stopFollow();
+  if (e.target.checked) {
+    $("#logs-view-newer-wrap").classList.add("hidden");
+    renderLogView({ scroll: "bottom" });
+    followTick();
+  } else {
+    renderLogView();
+  }
+});
+$("#logs-view-older").addEventListener("click", loadOlderLogLines);
+$("#logs-view-newer").addEventListener("click", loadNewerLogLines);
+$("#logs-view-download").addEventListener("click", () => { if (LV) downloadLogFile(LV.proxy, LV.file); });
+$("#logsearch-download").addEventListener("click", () => {
+  if (!lastSearchResult) return;
+  const lines = lastSearchResult.matches.map((h) => h.proxy + "/" + h.file + ":" + h.line + "  " + h.text);
+  saveTextAs("bbsfirewall-search-" + new Date().toISOString().slice(0, 10) + ".txt",
+    "# BBSFirewall log search: " + lastSearchResult.q + NL + lines.join(NL) + NL);
+});
 
 /* ---------- restart with the keep-session choice ---------- */
 
@@ -1660,17 +2456,26 @@ $("#btn-restart").addEventListener("click", () => {
   };
 });
 
+// "Back" means a NEW process answered. The old one keeps serving already-open
+// keep-alive connections for a few seconds while it shuts down (deliberately —
+// see stopConfigEditorServer()), so a plain 200 used to trigger the reload
+// against the dying process, whose page then lost its data mid-load.
 async function waitForReconnect() {
   notice("warn", "Restarting — waiting for the editor to come back…");
+  const oldPid = DATA && DATA.status ? DATA.status.pid : null;
   const deadline = Date.now() + 60000;
   await new Promise((r) => setTimeout(r, 3000));
   while (Date.now() < deadline) {
     try {
-      const r = await fetch("api/config", { headers: { "X-CSRF-Token": CSRF }, cache: "no-store" });
-      if (r.status === 200) { notice("ok", "Reconnected."); location.reload(); return; }
+      const r = await fetchWithTimeout("api/config", { headers: { "X-CSRF-Token": CSRF }, cache: "no-store" }, 4000);
       if (r.status === 401) { location.href = "login"; return; }
+      if (r.status === 200) {
+        const d = await r.json();
+        const pid = d && d.status ? d.status.pid : null;
+        if (!oldPid || (pid && pid !== oldPid)) { notice("ok", "Reconnected."); location.reload(); return; }
+      }
     } catch (e) { /* still down */ }
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 1500));
   }
   notice("err", "Editor did not come back within 60s. Reload the page manually.");
   $("#btn-restart").disabled = false;
@@ -1740,13 +2545,18 @@ $("#btn-reboot").addEventListener("click", async () => {
 
 async function waitForReconnectAfterReboot() {
   notice("warn", "Server is rebooting — this can take several minutes. Waiting…");
+  const oldPid = DATA && DATA.status ? DATA.status.pid : null; // same new-process check as waitForReconnect()
   const deadline = Date.now() + 360000;
   await new Promise((r) => setTimeout(r, 15000));
   while (Date.now() < deadline) {
     try {
-      const r = await fetch("api/config", { headers: { "X-CSRF-Token": CSRF }, cache: "no-store" });
-      if (r.status === 200) { notice("ok", "Reconnected."); location.reload(); return; }
+      const r = await fetchWithTimeout("api/config", { headers: { "X-CSRF-Token": CSRF }, cache: "no-store" }, 4000);
       if (r.status === 401) { location.href = "login"; return; }
+      if (r.status === 200) {
+        const d = await r.json();
+        const pid = d && d.status ? d.status.pid : null;
+        if (!oldPid || (pid && pid !== oldPid)) { notice("ok", "Reconnected."); location.reload(); return; }
+      }
     } catch (e) { /* still down */ }
     await new Promise((r) => setTimeout(r, 5000));
   }

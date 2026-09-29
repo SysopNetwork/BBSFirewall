@@ -243,6 +243,32 @@ const config = {
         'aes256-cbc',
         '3des-cbc',
       ],
+
+  // Optional host-firewall (UFW) integration — reconciles a tagged subset of
+  // the box's own `ufw` rules against this config (see ufw.js). Off by
+  // default. Deliberately does NOT enable/disable ufw itself — that stays a
+  // one-time, sysop-driven step outside BBSFirewall. Phase 1 is preview/
+  // dry-run only; autoApply (phase 2) is a SEPARATE flag so a sysop can stay
+  // on manual-apply-forever if they don't trust auto-reconcile yet.
+  ufw: {
+    enabled: process.env.UFW_ENABLED === 'true',
+    // The box's real admin SSH port (NOT necessarily SSH_LISTEN_PORT, which
+    // is the BBS's own SSH front door — this is the port you manage the
+    // HOST with). Required to enable UFW management at all; no inference.
+    adminSshPort: process.env.HOST_ADMIN_SSH_PORT ? parseInt(process.env.HOST_ADMIN_SSH_PORT, 10) : null,
+    // Kernel-level rate limiting (ufw limit) on the admin port, on top of
+    // whatever the box's own sshd does. Off by default.
+    limitAdminSsh: process.env.UFW_LIMIT_ADMIN_SSH === 'true',
+    // Phase 2: auto-reconcile on save/startup instead of preview-only.
+    autoApply: process.env.UFW_AUTO_APPLY === 'true',
+    // Push blocklist.txt entries and trigger auto-blocks down as kernel-level
+    // `ufw deny` rules (ufw-blocks.js), so blocked callers are dropped even
+    // while BBSFirewall itself is restarting. Separate flag, off by default.
+    pushBlocks: process.env.UFW_PUSH_BLOCKS === 'true',
+    // Cap on pushed block rules - each rule is one more line every packet is
+    // checked against, and each ufw add/delete reloads the whole rule set.
+    maxBlockRules: parseInt(process.env.UFW_BLOCK_MAX_RULES, 10) || 1000,
+  },
 };
 
 function validateConfig() {
@@ -379,6 +405,23 @@ function validateConfig() {
   }
   if (config.fileLog.retentionDays < 1 || config.fileLog.retentionDays > 3650) {
     errors.push('LOG_RETENTION_DAYS must be between 1 and 3650');
+  }
+
+  // UFW management: HOST_ADMIN_SSH_PORT is required, not inferred — see
+  // ufw.js's file header for why a diff can never be trusted to guess which
+  // port is the box's real management SSH.
+  if (config.ufw.enabled) {
+    if (!config.ufw.adminSshPort) {
+      errors.push('HOST_ADMIN_SSH_PORT is required when UFW_ENABLED is true');
+    } else if (config.ufw.adminSshPort < 1 || config.ufw.adminSshPort > 65535) {
+      errors.push('HOST_ADMIN_SSH_PORT must be between 1 and 65535');
+    }
+  }
+  if (config.ufw.pushBlocks && !config.ufw.enabled) {
+    errors.push('UFW_PUSH_BLOCKS requires UFW_ENABLED=true');
+  }
+  if (config.ufw.maxBlockRules < 1 || config.ufw.maxBlockRules > 10000) {
+    errors.push('UFW_BLOCK_MAX_RULES must be between 1 and 10000');
   }
 
   if (errors.length > 0) {
