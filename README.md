@@ -722,6 +722,13 @@ Built on the foundation of [bbsfw](https://github.com/ryanfantus/bbsfw) by [Ryan
 
 ---
 
+## 💖 Tips / Donations
+
+- **Cash App:** [$laudenbachm](https://cash.app/$laudenbachm)
+- **Ko-fi:** [ko-fi.com/laudenbachm](https://ko-fi.com/laudenbachm)
+
+---
+
 ## 📄 License
 
 MIT — Copyright (c) 2026 Sysop Network
