@@ -15,7 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFile, execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const { https } = require('follow-redirects');
 
 const REPO = 'SysopNetwork/BBSFirewall';
@@ -24,17 +24,20 @@ const EXTRACT_TIMEOUT_MS = 60 * 1000;
 const VALIDATE_TIMEOUT_MS = 8000;
 const GITHUB_TIMEOUT_MS = 10000;
 const BACKUPS_KEPT = 5;
+const CHILD_MAX_BUFFER = 16 * 1024 * 1024; // npm install can print more than the 1MB default
 
 // Never restored from backup and never overlaid from a release — these are
 // either secrets, machine-local runtime state, or the backup store itself.
 // A GitHub release tarball is a `git archive` of the tag, so none of these
-// (all gitignored) are ever present in it anyway; this exclude list only
-// matters for what we back up FROM the live app directory.
+// (all gitignored) are ever present in it. Applied both when taking a backup
+// and when restoring one: a backup taken by an older version may still hold
+// some of these, and a restore must never roll them back.
 const APP_BACKUP_EXCLUDE = new Set([
-  'node_modules', '.git', 'data', 'certs', 'logs', 'ENVBACKUPS', 'update-backups',
+  'node_modules', '.git', 'data', 'certs', 'logs', 'ENVBACKUPS', 'ADMINBACKUPS', 'update-backups',
   '.env', '.admin-security.json', '.config-editor-sessions.json',
   'ssh_host_key', 'ssh_host_key.pub',
   'whitelist.txt', 'blocklist.txt', 'trustedhosts.txt', 'triggers.txt', 'api-trustedhosts.txt',
+  'status-trustedhosts.txt',
 ]);
 
 function execFileAsync(file, args, opts) {
@@ -266,6 +269,21 @@ function copyTree(src, dest, excludeTopLevel) {
   }
 }
 
+// The updater runs inside the live firewall process, where every telnet/SSH
+// session shares one event loop - so its child processes are always awaited,
+// never run with a *Sync call. A synchronous "npm install" (up to 5 minutes)
+// froze every connected caller for as long as it ran.
+function npmInstall(appDir) {
+  return execFileAsync('npm', ['install', '--omit=dev'], { cwd: appDir, timeout: NPM_INSTALL_TIMEOUT_MS, maxBuffer: CHILD_MAX_BUFFER });
+}
+
+function validateIn(appDir) {
+  return execFileAsync(process.execPath, ['-e', 'require("./config").validateConfig()'], {
+    cwd: appDir, timeout: VALIDATE_TIMEOUT_MS, maxBuffer: CHILD_MAX_BUFFER,
+    env: { ...process.env, DOTENV_CONFIG_QUIET: 'true' },
+  });
+}
+
 function extractValidateError(err) {
   const stderr = (err && err.stderr && err.stderr.toString()) || err.message || '';
   const m = stderr.match(/\bError:\s*Configuration validation failed:\r?\n/);
@@ -338,7 +356,9 @@ async function doApplyUpdate({ tag, appDir } = {}) {
 
   let release;
   if (tag) {
-    if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
+    // Pre-release tags (v1.5.0-beta.9) are allowed; the tag is still confirmed
+    // against GitHub's published releases below before it is used anywhere.
+    if (!/^v\d+\.\d+\.\d+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$/.test(tag)) {
       return { ok: false, error: `Invalid version tag "${tag}".` };
     }
     release = await fetchReleaseByTag(tag);
@@ -381,10 +401,10 @@ async function doApplyUpdate({ tag, appDir } = {}) {
     return { ok: false, error: `Backup failed — nothing was changed: ${err.message}` };
   }
 
-  const rollback = (reason) => {
+  const rollback = async (reason) => {
     try {
-      copyTree(backupDir, appDir, null);
-      execFileSync('npm', ['install', '--omit=dev'], { cwd: appDir, stdio: 'pipe', timeout: NPM_INSTALL_TIMEOUT_MS });
+      copyTree(backupDir, appDir, APP_BACKUP_EXCLUDE);
+      await npmInstall(appDir);
     } catch (restoreErr) {
       cleanupTmp();
       return {
@@ -411,7 +431,7 @@ async function doApplyUpdate({ tag, appDir } = {}) {
 
   try {
     fs.mkdirSync(stagingDir, { recursive: true });
-    execFileSync('tar', ['-xzf', tarPath, '-C', stagingDir, '--strip-components=1'], { timeout: EXTRACT_TIMEOUT_MS, stdio: 'pipe' });
+    await execFileAsync('tar', ['-xzf', tarPath, '-C', stagingDir, '--strip-components=1'], { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: CHILD_MAX_BUFFER });
   } catch (err) {
     return rollback(`Extracting the release failed: ${err.message}`);
   }
@@ -427,16 +447,13 @@ async function doApplyUpdate({ tag, appDir } = {}) {
   }
 
   try {
-    execFileSync('npm', ['install', '--omit=dev'], { cwd: appDir, stdio: 'pipe', timeout: NPM_INSTALL_TIMEOUT_MS });
+    await npmInstall(appDir);
   } catch (err) {
     return rollback(`"npm install" failed on the new version: ${(err.stderr || err.message).toString().slice(0, 2000)}`);
   }
 
   try {
-    execFileSync(process.execPath, ['-e', 'require("./config").validateConfig()'], {
-      cwd: appDir, stdio: 'pipe', timeout: VALIDATE_TIMEOUT_MS,
-      env: { ...process.env, DOTENV_CONFIG_QUIET: 'true' },
-    });
+    await validateIn(appDir);
   } catch (err) {
     return rollback(`The updated code rejected the current configuration:\n${extractValidateError(err)}`);
   }
@@ -478,12 +495,9 @@ async function doRollbackToBackup(backupName, appDir) {
   }
 
   try {
-    copyTree(backupDir, appDir, null);
-    execFileSync('npm', ['install', '--omit=dev'], { cwd: appDir, stdio: 'pipe', timeout: NPM_INSTALL_TIMEOUT_MS });
-    execFileSync(process.execPath, ['-e', 'require("./config").validateConfig()'], {
-      cwd: appDir, stdio: 'pipe', timeout: VALIDATE_TIMEOUT_MS,
-      env: { ...process.env, DOTENV_CONFIG_QUIET: 'true' },
-    });
+    copyTree(backupDir, appDir, APP_BACKUP_EXCLUDE);
+    await npmInstall(appDir);
+    await validateIn(appDir);
   } catch (err) {
     return { ok: false, error: `Rollback to "${backupName}" failed: ${(err.stderr || err.message).toString().slice(0, 2000)}` };
   }

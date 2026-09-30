@@ -120,9 +120,23 @@ function formatData(data) {
  * Write one line to a proxy's log file if its configured level permits the
  * event category. Cheap no-op when the proxy has file logging disabled.
  */
+// Log text often carries caller-controlled values (an SSH username, a
+// terminal type, an exec command). A raw CR/LF in one would start a forged
+// log line - e.g. a fake "[BLOCKED]" or "Config editor login" entry that the
+// Logs tab and search then show as real. Control characters other than tab
+// are written as \xNN instead. keepNewlines (console only) keeps a message's
+// own line breaks readable - a multi-line startup error - but indents each
+// continuation line so it can never pass for a real "[timestamp] [LEVEL]" entry.
+function escapeControl(text, keepNewlines) {
+  let s = String(text);
+  if (keepNewlines) s = s.replace(/\r?\n/g, '\n    ');
+  return s.replace(keepNewlines ? /[\x00-\x08\x0b-\x1f\x7f]/g : /[\x00-\x08\x0a-\x1f\x7f]/g,
+    (c) => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+}
+
 function write(proxyName, category, message, data) {
   if (!shouldWrite(proxyName, category)) return;
-  const line = `[${new Date().toISOString()}] [${category.toUpperCase()}] ${message}${formatData(data)}\n`;
+  const line = `[${new Date().toISOString()}] [${category.toUpperCase()}] ${escapeControl(message + formatData(data))}\n`;
   try {
     getStream(proxyName).write(line);
   } catch (err) {
@@ -555,7 +569,7 @@ function startPruning(intervalMs) {
 }
 
 module.exports = {
-  write, closeAll, LEVELS, listLogFiles, readLogFile, deleteLogFile, pruneOldLogs, startPruning,
+  write, escapeControl, closeAll, LEVELS, listLogFiles, readLogFile, deleteLogFile, pruneOldLogs, startPruning,
   searchLogs, parseQuery, SEARCH_LEVELS,
   readLogRange, readLogAroundLine, logFilePath,
 };

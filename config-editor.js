@@ -32,6 +32,7 @@ const crypto = require('crypto');
 const { promisify } = require('util');
 const { execFile, execFileSync } = require('child_process');
 const execFileAsync = promisify(execFile);
+const dotenv = require('dotenv');
 
 const logger = require('./logger');
 const { config } = require('./config');
@@ -279,7 +280,7 @@ const ENV_SCHEMA = [
         help: 'Phase 2 — not yet available. When built, reconciles automatically instead of requiring a manual Preview + Apply from the Tools tab each time.' },
       { key: 'UFW_PUSH_BLOCKS', type: 'bool', label: 'Push blocks to ufw (kernel-level)', def: 'false',
         help: 'Mirrors Blocklist entries and trigger auto-blocks into ufw as "deny from" rules, so blocked callers are dropped by the kernel even while BBSFirewall restarts. Runs automatically. Needs UFW rule management on and a non-empty Trusted Hosts list.',
-        helpLong: 'Each rule denies the address on EVERY port, so entries that overlap Trusted Hosts, the Whitelist, or loopback are never pushed (the Tools tab lists any it skipped). Rate-limit blocks are not pushed — they are short and hit ordinary callers who reconnect too fast. Temporary trigger blocks are removed from ufw when they expire. Turning this off stops syncing but leaves already-pushed rules in place; remove them from the Tools tab.' },
+        helpLong: 'Each rule denies the address on EVERY port, so entries that overlap Trusted Hosts, the Status or API allowlists, the Whitelist, or loopback are never pushed (the Tools tab lists any it skipped). Rate-limit blocks are not pushed — they are short and hit ordinary callers who reconnect too fast. Temporary trigger blocks are removed from ufw when they expire. Turning this off stops syncing but leaves already-pushed rules in place; remove them from the Tools tab.' },
       { key: 'UFW_BLOCK_MAX_RULES', type: 'int', label: 'Max pushed block rules', def: '1000',
         help: 'Upper limit on kernel block rules (1-10000). Over the limit, temporary blocks come first, then CIDR ranges, then the newest single IPs — the app still blocks everything else itself.' },
     ]},
@@ -290,36 +291,89 @@ const SCHEMA_KEYS = new Set(ENV_SCHEMA.flatMap((s) => s.fields.map((f) => f.key)
 // and buildConfigPayload's redaction below.
 const SCHEMA_FIELDS = new Map(ENV_SCHEMA.flatMap((s) => s.fields.map((f) => [f.key, f])));
 
+// Settings a 'firewall_admin' may see but not change. Each one either controls
+// who can reach this editor/API (so a firewall_admin could lock the Global
+// Admin out, or mint an API key that outlives their own account), is already
+// Global-Admin-only elsewhere (reboot, UFW), or names a file path this process
+// reads or writes as root. Whole sections are listed by name, single fields by
+// key. The Management API lane has no role and is not restricted by this.
+const MASTER_ONLY_SECTIONS = new Set(['Config Editor', 'Management API', 'Host Firewall (UFW)']);
+const MASTER_ONLY_KEYS = new Set([
+  ...ENV_SCHEMA.filter((s) => MASTER_ONLY_SECTIONS.has(s.name)).flatMap((s) => s.fields.map((f) => f.key)),
+  'WHITELIST_PATH', 'BLOCKLIST_PATH', 'TRIGGER_LIST_PATH', 'LOG_DIR',
+  'SSH_HOST_KEY', 'HTTPS_CERT_PATH', 'HTTPS_KEY_PATH',
+]);
+// List files that decide who reaches this editor, the API, or GET /status.
+const MASTER_ONLY_FILES = new Set(['trustedhosts', 'apihosts', 'statushosts']);
+
+// Paths this editor writes list files to (or, for LOG_DIR, deletes files
+// under). Unchecked, one Save pointing WHITELIST_PATH at /etc/cron.d/x or at
+// ./server.js turned "edit the whitelist" into writing any file as root.
+const LIST_PATH_KEYS = new Set([
+  'WHITELIST_PATH', 'BLOCKLIST_PATH', 'TRIGGER_LIST_PATH', 'CONFIG_EDITOR_TRUSTEDHOSTS_PATH', 'API_TRUSTEDHOSTS_PATH',
+]);
+const DIR_PATH_KEYS = new Set(['LOG_DIR']);
+// Which list file each path key names (listFileTargets() form names).
+const LIST_KEY_FILE = {
+  WHITELIST_PATH: 'whitelist',
+  BLOCKLIST_PATH: 'blocklist',
+  TRIGGER_LIST_PATH: 'triggers',
+  CONFIG_EDITOR_TRUSTEDHOSTS_PATH: 'trustedhosts',
+  API_TRUSTEDHOSTS_PATH: 'apihosts',
+};
+const PROTECTED_APP_DIRS = new Set(['node_modules', '.git', 'update-backups', 'ENVBACKUPS', 'ADMINBACKUPS', 'certs', 'data', 'assets']);
+
+// Returns why `p` is not an acceptable list file (asDir=false) or log folder
+// (asDir=true), or null when it is: it must resolve inside the BBSFirewall
+// folder, outside the folders the app manages itself, and a list file must be
+// a .txt file.
+function appPathError(p, asDir) {
+  const abs = path.resolve(String(p || ''));
+  const rel = path.relative(__dirname, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return `must be inside the BBSFirewall folder (${__dirname})`;
+  }
+  if (PROTECTED_APP_DIRS.has(rel.split(path.sep)[0])) {
+    return `must not be inside the app's own ${rel.split(path.sep)[0]} folder`;
+  }
+  if (!asDir && !/\.txt$/i.test(abs)) return 'must be a .txt file';
+  return null;
+}
+
+// Normalises list-file text exactly the way doSave writes it, so "unchanged"
+// can be compared against what is on disk.
+function normalizeListText(text) {
+  let t = String(text || '').replace(/\r\n/g, '\n');
+  if (t !== '' && !t.endsWith('\n')) t += '\n';
+  return t;
+}
+
 // ---------------------------------------------------------------------------
 // .env parsing / writing
 // ---------------------------------------------------------------------------
 
 const ENV_LINE_RE = /^(\s*)(#\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
+// Reads one .env value exactly the way the running app will: through dotenv
+// itself. A hand-written copy of its quoting rules drifted from the real
+// thing (backslashes and quotes written by this editor came back doubled in
+// the app while the editor showed them correctly).
 function stripEnvValue(raw) {
-  let v = raw.trim();
-  if (v.length >= 2 &&
-      ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
-    const quote = v[0];
-    v = v.slice(1, -1);
-    if (quote === '"') {
-      v = v.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-    }
-    return v;
-  }
-  // unquoted: cut an inline comment introduced by whitespace + '#'
-  const m = v.match(/\s#/);
-  if (m) v = v.slice(0, m.index).trim();
-  return v;
+  const v = dotenv.parse(`K=${raw}`).K;
+  return v === undefined ? '' : v;
 }
 
+// Writes a value in the first form dotenv reads back byte-for-byte: bare,
+// then 'single', `backtick`, "double" quotes (dotenv unescapes nothing in the
+// first two, only \n and \r in double quotes). Each candidate is checked with
+// dotenv itself; a value no form can carry is refused rather than saved wrong.
 function serializeEnvValue(v) {
   if (/[\r\n]/.test(v)) throw new Error('value must not contain a newline');
   if (v === '') return '';
-  if (/^\s|\s$|[#"'`\\$]/.test(v)) {
-    return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  for (const candidate of [v, `'${v}'`, `\`${v}\``, `"${v}"`]) {
+    if (stripEnvValue(candidate) === v) return candidate;
   }
-  return v;
+  throw new Error(`value ${JSON.stringify(v)} cannot be stored in .env exactly — it mixes ', \` and " quote characters`);
 }
 
 // Parse .env text into { active: {K:v}, commented: {K:v} }.
@@ -629,7 +683,10 @@ function createSession(username, ip, mfaVerified, role, mfaSetupRequired) {
   const now = Date.now();
   sessions.set(token, {
     username, ip, created: now, lastSeen: now, csrf,
-    mfaVerified: !!mfaVerified, role: role || 'master_admin', mfaSetupRequired: !!mfaSetupRequired,
+    // Every caller passes the account's (normalized) role; a missing one gets
+    // the least access rather than the most.
+    mfaVerified: !!mfaVerified, role: security.ROLES.includes(role) ? role : 'firewall_admin',
+    mfaSetupRequired: !!mfaSetupRequired,
   });
   return { token, csrf };
 }
@@ -644,7 +701,11 @@ function revokeOtherSessionsForUser(username, exceptToken) {
   }
 }
 
-function getSession(req) {
+// touch=false: the request is a page's own timer (System Stats refresh, log
+// Follow, UFW sync progress), not the admin doing something, so it must not
+// count as activity - otherwise an open tab kept the idle timeout from ever
+// firing. The idle/absolute checks still apply to it.
+function getSession(req, touch = true) {
   const token = parseCookies(req)[COOKIE_NAME];
   if (!token || !TOKEN_RE.test(token)) return null;
   const s = sessions.get(token);
@@ -657,7 +718,7 @@ function getSession(req) {
     sessions.delete(token);
     return null;
   }
-  s.lastSeen = now;
+  if (touch) s.lastSeen = now;
   return { token, ...s };
 }
 
@@ -801,6 +862,18 @@ function appVersion() {
     cachedVersion = '';
   }
   return cachedVersion;
+}
+
+// The editable list files, by form name, at the paths the running process uses.
+function listFileTargets() {
+  return [
+    ['whitelist', config.whitelistPath || './whitelist.txt'],
+    ['blocklist', config.blocklistPath || './blocklist.txt'],
+    ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
+    ['triggers', config.triggerBlock.listPath || './triggers.txt'],
+    ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
+    ['statushosts', config.status.trustedHostsPath || './status-trustedhosts.txt'],
+  ];
 }
 
 function readFileSafe(p) {
@@ -985,6 +1058,7 @@ async function buildConfigPayload(session) {
         help: f.help || null,
         helpLong: f.helpLong || null,
         required: !!f.required,
+        masterOnly: MASTER_ONLY_KEYS.has(f.key),
         options: f.options || null,
         enabled: f.required ? true : active,
         // A secret's actual value never reaches the browser, for ANY
@@ -1003,16 +1077,9 @@ async function buildConfigPayload(session) {
   }));
 
   const files = {};
-  for (const [name, p] of [
-    ['whitelist', config.whitelistPath || './whitelist.txt'],
-    ['blocklist', config.blocklistPath || './blocklist.txt'],
-    ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
-    ['triggers', config.triggerBlock.listPath || './triggers.txt'],
-    ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
-    ['statushosts', config.status.trustedHostsPath || './status-trustedhosts.txt'],
-  ]) {
+  for (const [name, p] of listFileTargets()) {
     const r = readFileSafe(p);
-    files[name] = { path: p, content: r.content, exists: r.exists };
+    files[name] = { path: p, content: r.content, exists: r.exists, masterOnly: MASTER_ONLY_FILES.has(name) };
   }
 
   return {
@@ -1080,6 +1147,18 @@ async function doSave(req, res, session) {
 
   const envInput = (payload && payload.env) || {};
   const filesInput = (payload && payload.files) || {};
+  // Each list file's text as the page loaded it (the browser sends these;
+  // older API callers don't). Lets a save tell "the admin edited this" apart
+  // from "the file changed on disk since the page loaded" - trigger auto-blocks
+  // and "Whitelist my IP" append to these files while the page is open.
+  const filesBase = (payload && payload.filesBase) || {};
+  const diskList = new Map(listFileTargets().map(([name, p]) => [name, normalizeListText(readFileSafe(p).content)]));
+  const listEdited = (name) => {
+    const submitted = normalizeListText(filesInput[name]);
+    return typeof filesBase[name] === 'string'
+      ? submitted !== normalizeListText(filesBase[name])
+      : submitted !== diskList.get(name);
+  };
 
   const envPath = path.resolve(config.configEditor.envPath);
   const dir = path.dirname(envPath);
@@ -1110,6 +1189,50 @@ async function doSave(req, res, session) {
     if (/[\r\n]/.test(value)) return sendJson(res, 400, { error: `${key} must not contain a newline` });
     const enabled = entry.required ? true : entry.enabled !== false;
     updates[key] = { value, enabled };
+  }
+
+  // What the form showed for a key before this save: the same value/enabled
+  // pair buildConfigPayload sends, so a field the admin left alone always
+  // compares equal (a required key missing from .env shows its default).
+  const isChanged = (key) => {
+    const f = SCHEMA_FIELDS.get(key);
+    const active = Object.prototype.hasOwnProperty.call(currentParsed.active, key);
+    const curEnabled = f.required ? true : active;
+    const curValue = active ? currentParsed.active[key] : (f.required ? (currentParsed.commented[key] || f.def || '') : '');
+    const u = updates[key];
+    if (u.enabled !== curEnabled) return true;
+    return u.enabled && u.value !== curValue;
+  };
+
+  if (session.role === 'firewall_admin') {
+    const blockedKeys = Object.keys(updates).filter((k) => MASTER_ONLY_KEYS.has(k) && isChanged(k));
+    const blockedFiles = [...MASTER_ONLY_FILES].filter((name) => typeof filesInput[name] === 'string' && listEdited(name));
+    if (blockedKeys.length || blockedFiles.length) {
+      return sendJson(res, 403, {
+        error: 'Only a Global Admin account can change: ' + [...blockedKeys, ...blockedFiles].join(', '),
+      });
+    }
+  }
+
+  // A changed list-file path or log folder must stay inside the app folder.
+  // Only CHANGED values are checked, so a box whose .env was hand-set to some
+  // other location can still save everything else.
+  for (const key of Object.keys(updates)) {
+    const asDir = DIR_PATH_KEYS.has(key);
+    if (!asDir && !LIST_PATH_KEYS.has(key)) continue;
+    if (!updates[key].enabled || !updates[key].value || !isChanged(key)) continue;
+    const err = appPathError(updates[key].value, asDir);
+    if (err) return sendJson(res, 400, { error: `${key} ${err}.` });
+    // The running process keeps using the OLD path until a restart, so an
+    // edit to the same list in this save would land in the old file and the
+    // new one would come up without it.
+    const listName = LIST_KEY_FILE[key];
+    if (listName && typeof filesInput[listName] === 'string' && listEdited(listName)) {
+      return sendJson(res, 400, {
+        error: `${key} is changing in this save, so edit that list after the restart — ` +
+          'save the path change on its own first.',
+      });
+    }
   }
 
   const inlineErrors = inlineValidate(updates);
@@ -1161,6 +1284,36 @@ async function doSave(req, res, session) {
           tv.slow.slice(0, 3).join(', '),
       });
     }
+  }
+
+  // Decide each list file's new content up front, so a conflict refuses the
+  // whole save before .env is touched. With a base from the page:
+  //   - not edited               -> left alone (never rewritten from a stale copy)
+  //   - disk unchanged since load -> the admin's text
+  //   - disk only GREW since load -> the admin's text + the lines added since
+  //                                  (auto-blocks, "Whitelist my IP")
+  //   - disk changed otherwise   -> 409, reload and redo the edit
+  // Without a base (Management API callers) the submitted text is the file.
+  // Nothing between here and the writes below yields the event loop, so no
+  // auto-block can land in between.
+  const fileWrites = new Map();
+  const conflicts = [];
+  for (const [name] of listFileTargets()) {
+    if (typeof filesInput[name] !== 'string') continue;
+    const submitted = normalizeListText(filesInput[name]);
+    if (typeof filesBase[name] !== 'string') { fileWrites.set(name, submitted); continue; }
+    if (!listEdited(name)) continue;
+    const baseText = normalizeListText(filesBase[name]);
+    const disk = diskList.get(name);
+    if (disk === baseText) fileWrites.set(name, submitted);
+    else if (disk.startsWith(baseText)) fileWrites.set(name, submitted + disk.slice(baseText.length));
+    else conflicts.push(name);
+  }
+  if (conflicts.length) {
+    return sendJson(res, 409, {
+      error: `${conflicts.join(', ')} changed on disk since this page loaded. Nothing was saved — ` +
+        'reload the page and make your edit again.',
+    });
   }
 
   let newText;
@@ -1228,20 +1381,39 @@ async function doSave(req, res, session) {
 
   pruneBackups(backupDir, base);
 
-  // Write the list files after the .env passes.
+  // A list whose path just changed: if nothing is at the new path yet, start
+  // it with the current list, so the restart doesn't come up with an empty
+  // one (an empty Trusted Hosts list locks everyone out of this editor).
   const fileResults = {};
-  for (const [name, target] of [
-    ['whitelist', config.whitelistPath || './whitelist.txt'],
-    ['blocklist', config.blocklistPath || './blocklist.txt'],
-    ['trustedhosts', config.configEditor.trustedHostsPath || './trustedhosts.txt'],
-    ['triggers', config.triggerBlock.listPath || './triggers.txt'],
-    ['apihosts', config.api.trustedHostsPath || './api-trustedhosts.txt'],
-    ['statushosts', config.status.trustedHostsPath || './status-trustedhosts.txt'],
-  ]) {
-    if (typeof filesInput[name] !== 'string') continue;
+  for (const [key, listName] of Object.entries(LIST_KEY_FILE)) {
+    const u = updates[key];
+    if (!u || !u.enabled || !u.value || !isChanged(key)) continue;
+    const abs = path.resolve(u.value);
+    if (fs.existsSync(abs)) continue;
     try {
-      let text = filesInput[name].replace(/\r\n/g, '\n');
-      if (text !== '' && !text.endsWith('\n')) text += '\n';
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, diskList.get(listName), { mode: SECRET_FILE_MODE });
+      chmodQuiet(abs, SECRET_FILE_MODE);
+      fileResults[`${listName}-new-path`] = `created ${u.value} from the current list`;
+    } catch (err) {
+      fileResults[`${listName}-new-path`] = `error: could not create ${u.value}: ${err.message}`;
+    }
+  }
+
+  // Write the list files after the .env passes.
+  for (const [name, target] of listFileTargets()) {
+    if (typeof filesInput[name] !== 'string') continue;
+    if (!fileWrites.has(name)) { fileResults[name] = 'unchanged'; continue; }
+    // Same rule as a changed path above, applied to the path actually being
+    // written - covers a .env hand-edited to point somewhere unsafe.
+    const pathErr = appPathError(target, false);
+    if (pathErr) {
+      fileResults[name] = `error: not written — ${target} ${pathErr}`;
+      fileWrites.delete(name);
+      continue;
+    }
+    try {
+      const text = fileWrites.get(name);
       const abs = path.resolve(target);
       fs.writeFileSync(abs, text, { mode: SECRET_FILE_MODE });
       chmodQuiet(abs, SECRET_FILE_MODE);
@@ -1262,9 +1434,9 @@ async function doSave(req, res, session) {
   try {
     const ipf = require('./ipfilter').getIPFilter();
     if (ipf) {
-      if (typeof filesInput.whitelist === 'string' && ipf.reloadWhitelist) ipf.reloadWhitelist();
-      if (typeof filesInput.blocklist === 'string' && ipf.reloadBlocklist) ipf.reloadBlocklist();
-      if (typeof filesInput.triggers === 'string' && ipf.reloadTriggers) ipf.reloadTriggers();
+      if (fileWrites.has('whitelist') && ipf.reloadWhitelist) ipf.reloadWhitelist();
+      if (fileWrites.has('blocklist') && ipf.reloadBlocklist) ipf.reloadBlocklist();
+      if (fileWrites.has('triggers') && ipf.reloadTriggers) ipf.reloadTriggers();
     }
   } catch (_) { /* ipfilter not ready — restart will pick it up */ }
   // Trusted Hosts protects addresses from the kernel block push, so a change
@@ -1332,12 +1504,10 @@ function loadPersistedSessions() {
       // login, so it should not re-challenge for MFA. Defaults to false (the
       // safer state) for an older persisted session that predates this field.
       mfaVerified: !!s.mfaVerified,
-      // Defaults to 'master_admin' for a session persisted before roles
-      // existed - matches normalizeAccount()'s same default for a pre-role
-      // account. (A session persisted with a pre-rename 'owner'/'provider'
-      // value won't match security.ROLES either, so it gets the same safe
-      // default rather than staying stuck on the old name.)
-      role: security.ROLES.includes(s.role) ? s.role : 'master_admin',
+      // Anything but a current role name (a pre-roles or pre-rename session,
+      // or a damaged file) comes back with the LEAST access; that admin can
+      // sign in again to get their account's real role.
+      role: security.ROLES.includes(s.role) ? s.role : 'firewall_admin',
       // Same reasoning: an older persisted session predates mfaRequired
       // entirely, so false (no forced enrollment) is the accurate default,
       // not just the "safe" one.
@@ -1752,6 +1922,10 @@ async function computeUfwState() {
   // rule for this port" catches both an unset port AND an empty trust list in
   // one place, rather than re-deriving the same condition two different ways.
   const adminRuleOk = !adminPort || desired.some((r) => r.to === `${adminPort}/tcp`);
+  // ...and a diff must never strip the last rule from a port sshd is
+  // actually listening on (see ufw.sshdLockoutRemovals).
+  const sshdPorts = await ufw.listeningSshdPorts();
+  const sshdLockout = ufw.sshdLockoutRemovals(diff, desired, sshdPorts);
 
   return {
     ok: true,
@@ -1762,6 +1936,8 @@ async function computeUfwState() {
       ufwActive: true,
       adminSshPort: adminPort,
       adminRuleOk,
+      sshdPorts, // null = could not be determined on this host
+      sshdLockout,
       ipv6Supported,
       current: current.rules.filter((r) => r.comment === ufw.TAG),
       desired,
@@ -1817,6 +1993,14 @@ async function handleUfwApply(req, res, session) {
     return sendJson(res, 400, {
       error: `Refusing: the computed rule set would leave the admin SSH port (${state.body.adminSshPort}) ` +
         'without an allow/limit rule — check Trusted Hosts is not empty, then try again.',
+    });
+  }
+  if (state.body.sshdLockout.length) {
+    release('ufw');
+    const ports = [...new Set(state.body.sshdLockout.map((r) => r.to))].join(', ');
+    return sendJson(res, 400, {
+      error: `Refusing: this would remove the only BBSFirewall rule for ${ports}, where sshd is listening ` +
+        'right now. Move sshd to the new admin port (or set Admin SSH port back) first, then apply.',
     });
   }
   if (state.body.inSync) {
@@ -2241,8 +2425,10 @@ function handleLogsDownload(res, query) {
   const proxy = query.get('proxy') || '';
   const file = query.get('file') || '';
   let full;
+  let size;
   try {
     full = require('./file-logger').logFilePath(proxy, file);
+    size = fs.statSync(full).size; // inside the try: the file can be pruned in between
   } catch (err) {
     if (err.code === 'ENOENT') return sendJson(res, 404, { error: 'Log file not found' });
     return sendJson(res, 400, { error: err.message });
@@ -2252,7 +2438,7 @@ function handleLogsDownload(res, query) {
   res.writeHead(200, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Content-Disposition': `attachment; filename="${file}"`,
-    'Content-Length': fs.statSync(full).size,
+    'Content-Length': size,
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
   });
@@ -2377,12 +2563,20 @@ async function handleLoginPost(req, res, ip) {
   // anymore. Still always runs real scrypt work against SOME record (the
   // account's own, or the dummy) so response time doesn't reveal whether the
   // username exists.
+  //
+  // The scrypt check is awaited (off the event loop), so parallel requests
+  // could all pass the lockout test above before any failure was counted.
+  // Re-test now that the body is in, and count this attempt as a failure
+  // BEFORE the await - a success clears it below.
+  if (loginLocked(ip)) {
+    return sendPage(res, 429, (n) => views.loginPage({ nonce: n, error: 'Too many failed attempts. Try again later.' }));
+  }
+  recordLoginFail(ip);
   const secrets = security.readSecrets(username);
   const passRecord = secrets ? secrets.password : DUMMY_PASSWORD_RECORD;
-  const passOk = security.verifyPassword(password, passRecord);
+  const passOk = await security.verifyPasswordAsync(password, passRecord);
   const ok = !!secrets && passOk;
   if (!ok) {
-    recordLoginFail(ip);
     log.blocked(`Failed config editor login for "${sanitizeForLog(username)}" from ${ip}`);
     return sendPage(res, 401, (n) => views.loginPage({ nonce: n, error: 'Invalid username or password.' }));
   }
@@ -2435,15 +2629,20 @@ async function handleMfaVerifyLogin(req, res, session, ip) {
     return sendJson(res, 400, { error: 'MFA is not enabled on this account.' });
   }
 
+  // Same pre-counting as handleLoginPost: re-test the lock now the body is in,
+  // and count the attempt before the (awaited) backup-code check.
+  if (mfaLocked(ip)) {
+    return sendJson(res, 429, { error: 'Too many failed attempts. Try again later.' });
+  }
+  recordMfaFail(ip);
   let ok = false;
   if (body.backupCode) {
-    ok = security.verifyAndConsumeBackupCode(secrets, String(body.backupCode));
+    ok = await security.verifyAndConsumeBackupCodeAsync(session.username, String(body.backupCode));
   } else if (body.code) {
     ok = security.verifyTotp(secrets, 'secret', String(body.code));
   }
 
   if (!ok) {
-    recordMfaFail(ip);
     log.blocked(`Failed MFA verification for "${sanitizeForLog(session.username)}" from ${ip}`);
     return sendJson(res, 401, { error: 'Invalid code.' });
   }
@@ -2463,7 +2662,7 @@ async function handleChangePassword(req, res, session) {
 
   const secrets = security.readSecrets(session.username);
   if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
-  if (!security.verifyPassword(current, secrets.password)) {
+  if (!(await security.verifyPasswordAsync(current, secrets.password))) {
     release('security');
     return sendJson(res, 401, { error: 'Current password is incorrect.' });
   }
@@ -2473,8 +2672,13 @@ async function handleChangePassword(req, res, session) {
     return sendJson(res, 400, { error: pwErr });
   }
 
-  secrets.password = security.hashPassword(next);
-  security.writeSecrets(secrets);
+  // Hash first (awaited), then re-read and write with no await in between -
+  // see the note above security.hashPasswordAsync.
+  const newRecord = await security.hashPasswordAsync(next);
+  const fresh = security.readSecrets(session.username);
+  if (!fresh) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
+  fresh.password = newRecord;
+  security.writeSecrets(fresh);
 
   // An attacker holding a stolen session cookie should not survive a
   // password change — drop every OTHER session for THIS account (other
@@ -2492,12 +2696,37 @@ async function handleChangePassword(req, res, session) {
 
 async function handleMfaSetup(req, res, session) {
   if (!acquire(res, 'security')) return;
+  let body;
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { body = {}; }
+
   const secrets = security.readSecrets(session.username);
   if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
 
+  // Enrolling over a live factor would let a stolen session cookie swap in
+  // the attacker's authenticator with no password or current code - the
+  // exact proof handleMfaDisable demands. Replacing an authenticator means
+  // disabling MFA first.
+  if (secrets.mfa && secrets.mfa.enabled) {
+    release('security');
+    return sendJson(res, 409, { error: 'MFA is already enabled. Disable it first to set up a new authenticator.' });
+  }
+  // Voluntary enrollment re-proves the password, same as change-password -
+  // otherwise a stolen cookie enrolls its own authenticator and signs the
+  // real owner out. Forced enrollment is exempt: that session was created by
+  // a password login moments ago and can reach nothing but these endpoints.
+  if (!session.mfaSetupRequired && !(await security.verifyPasswordAsync(String(body.currentPassword || ''), secrets.password))) {
+    release('security');
+    return sendJson(res, 401, { error: 'Current password is incorrect.' });
+  }
+
   const pendingSecret = security.generateTotpSecret();
-  secrets.mfa.pendingSecret = pendingSecret;
-  security.writeSecrets(secrets);
+  const fresh = security.readSecrets(session.username); // re-read after the await
+  if (!fresh || (fresh.mfa && fresh.mfa.enabled)) {
+    release('security');
+    return sendJson(res, 409, { error: 'MFA is already enabled. Disable it first to set up a new authenticator.' });
+  }
+  fresh.mfa.pendingSecret = pendingSecret;
+  security.writeSecrets(fresh);
 
   release('security');
   return sendJson(res, 200, {
@@ -2517,18 +2746,32 @@ async function handleMfaConfirm(req, res, session) {
     release('security');
     return sendJson(res, 400, { error: 'No MFA setup in progress — start from "Enable MFA" again.' });
   }
+  // Same rule as handleMfaSetup: never replace a live factor this way (a
+  // pendingSecret left over from before MFA was enabled must not work either).
+  if (secrets.mfa.enabled) {
+    release('security');
+    return sendJson(res, 409, { error: 'MFA is already enabled. Disable it first to set up a new authenticator.' });
+  }
   if (!security.verifyTotp(secrets, 'pendingSecret', String(body.code || ''))) {
     release('security');
     return sendJson(res, 401, { error: 'Invalid code.' });
   }
 
-  secrets.mfa.secret = secrets.mfa.pendingSecret;
-  secrets.mfa.pendingSecret = null;
-  secrets.mfa.enabled = true;
-  secrets.mfa.confirmedAt = Date.now();
+  // Hash the new codes first (awaited), then re-read and write in one step.
   const backupCodes = security.generateBackupCodes(8);
-  secrets.backupCodes = backupCodes.map((c) => security.hashBackupCode(c));
-  security.writeSecrets(secrets);
+  const hashed = await Promise.all(backupCodes.map((c) => security.hashBackupCodeAsync(c)));
+  const fresh = security.readSecrets(session.username);
+  if (!fresh || fresh.mfa.enabled || fresh.mfa.pendingSecret !== secrets.mfa.pendingSecret) {
+    release('security');
+    return sendJson(res, 409, { error: 'MFA setup changed while confirming — start from "Enable MFA" again.' });
+  }
+  fresh.mfa.secret = fresh.mfa.pendingSecret;
+  fresh.mfa.pendingSecret = null;
+  fresh.mfa.enabled = true;
+  fresh.mfa.confirmedAt = Date.now();
+  fresh.mfa.lastUsedStep = secrets.mfa.lastUsedStep; // the step verifyTotp just accepted
+  fresh.backupCodes = hashed;
+  security.writeSecrets(fresh);
 
   // Clears the forced-enrollment gate for THIS session immediately, so an
   // account with mfaRequired policy gets full access right after completing
@@ -2560,7 +2803,7 @@ async function handleMfaDisable(req, res, session) {
 
   const secrets = security.readSecrets(session.username);
   if (!secrets) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
-  if (!security.verifyPassword(String(body.currentPassword || ''), secrets.password)) {
+  if (!(await security.verifyPasswordAsync(String(body.currentPassword || ''), secrets.password))) {
     release('security');
     return sendJson(res, 401, { error: 'Current password is incorrect.' });
   }
@@ -2569,16 +2812,21 @@ async function handleMfaDisable(req, res, session) {
   // still requires a live TOTP code or an unused backup code, same as any
   // other MFA check.
   let factorOk = false;
-  if (body.backupCode) factorOk = security.verifyAndConsumeBackupCode(secrets, String(body.backupCode));
-  else if (body.code) factorOk = security.verifyTotp(secrets, 'secret', String(body.code));
+  if (body.backupCode) {
+    factorOk = await security.verifyAndConsumeBackupCodeAsync(session.username, String(body.backupCode));
+  } else if (body.code) {
+    factorOk = security.verifyTotp(security.readSecrets(session.username), 'secret', String(body.code));
+  }
   if (!factorOk) {
     release('security');
     return sendJson(res, 401, { error: 'Invalid code.' });
   }
 
-  secrets.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
-  secrets.backupCodes = [];
-  security.writeSecrets(secrets);
+  const fresh = security.readSecrets(session.username); // re-read after the awaits
+  if (!fresh) { release('security'); return sendJson(res, 400, { error: 'No admin account configured.' }); }
+  fresh.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
+  fresh.backupCodes = [];
+  security.writeSecrets(fresh);
 
   // Security-posture change — same revoke-the-rest policy as password change
   // and MFA enable, above.
@@ -2599,14 +2847,20 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
     release('security');
     return sendJson(res, 400, { error: 'MFA is not enabled on this account.' });
   }
-  if (!security.verifyPassword(String(body.currentPassword || ''), secrets.password)) {
+  if (!(await security.verifyPasswordAsync(String(body.currentPassword || ''), secrets.password))) {
     release('security');
     return sendJson(res, 401, { error: 'Current password is incorrect.' });
   }
 
   const backupCodes = security.generateBackupCodes(8);
-  secrets.backupCodes = backupCodes.map((c) => security.hashBackupCode(c));
-  security.writeSecrets(secrets);
+  const hashed = await Promise.all(backupCodes.map((c) => security.hashBackupCodeAsync(c)));
+  const fresh = security.readSecrets(session.username); // re-read after the awaits
+  if (!fresh || !fresh.mfa.enabled) {
+    release('security');
+    return sendJson(res, 400, { error: 'MFA is not enabled on this account.' });
+  }
+  fresh.backupCodes = hashed;
+  security.writeSecrets(fresh);
 
   // Security-posture change — same revoke-the-rest policy as above.
   revokeOtherSessionsForUser(session.username, session.token);
@@ -3050,7 +3304,9 @@ async function onRequest(req, res) {
     }
 
     // --- everything below requires a session ---
-    const session = getSession(req);
+    const backgroundPoll = method === 'GET' && (pathname === '/api/stats' || pathname === '/api/ufw/blocks' ||
+      (pathname === '/api/logs/view' && query.get('after') !== null));
+    const session = getSession(req, !backgroundPoll);
     const wantsJson = pathname.startsWith('/api/');
 
     if (!session) {
@@ -3391,6 +3647,9 @@ function respondPlainRedirect(socket, firstChunk, ce) {
     if (!host) {
       const hh = (head.match(/\r\nHost:[ \t]*([^\r\n]+)/i) || [])[1] || '';
       host = hh.replace(/:\d+$/, '').trim();
+      // Only a plain hostname / IPv4 / [IPv6] may be echoed into Location -
+      // anything else (userinfo, paths, odd characters) falls back below.
+      if (!/^([A-Za-z0-9-]+\.)*[A-Za-z0-9-]+$|^\[[0-9A-Fa-f:.]+\]$/.test(host)) host = '';
     }
     if (!host) host = (ce.bindAddress && ce.bindAddress !== '0.0.0.0' && ce.bindAddress !== '::')
       ? ce.bindAddress : 'localhost';

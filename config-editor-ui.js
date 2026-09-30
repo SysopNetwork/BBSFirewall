@@ -896,7 +896,7 @@ function renderSettings() {
     const body = el("div", "sec-body");
     if (sec.help) body.appendChild(el("div", "sec-help", esc(sec.help)));
     for (const f of sec.fields) {
-      const div = el("div", "field" + (f.required || f.enabled ? "" : " optional-off"));
+      const div = el("div", "field" + (f.required || f.enabled ? "" : " optional-off") + (f.masterOnly ? " master-only" : ""));
       let head;
       if (f.required) {
         head = '<label for="f_' + f.key + '">' + esc(f.label) + ' <span class="muted">(' + f.key + ")</span></label>";
@@ -906,6 +906,7 @@ function renderSettings() {
           esc(f.label) + ' <span class="muted">(' + f.key + ")</span></label></div>";
       }
       let extra = f.help ? '<div class="help">' + esc(f.help) + "</div>" : "";
+      if (f.masterOnly && !isMasterAdmin()) extra += '<div class="help">Only a Global Admin account can change this.</div>';
       if (f.helpLong) {
         extra += '<details class="more"><summary>more</summary><div class="body">' + esc(f.helpLong) + "</div></details>";
       }
@@ -925,6 +926,15 @@ function renderSettings() {
     cb.addEventListener("change", sync);
     sync();
   });
+  // Read-only for a Firewall Admin - the server refuses these changes anyway.
+  if (!isMasterAdmin()) {
+    host.querySelectorAll(".field.master-only input, .field.master-only select, .field.master-only button")
+      .forEach((c) => { c.disabled = true; });
+  }
+}
+
+function isMasterAdmin() {
+  return !!(DATA && DATA.status && DATA.status.role === "master_admin");
 }
 
 /* ---------- list-file tabs ---------- */
@@ -933,6 +943,7 @@ function renderFiles() {
   for (const name of ["whitelist", "blocklist", "trustedhosts", "triggers", "apihosts", "statushosts"]) {
     const info = (DATA.files || {})[name] || {};
     $("#ta-" + name).value = info.content || "";
+    $("#ta-" + name).readOnly = !!info.masterOnly && !isMasterAdmin();
     $("#path-" + name).textContent = info.path ? "(" + info.path + (info.exists ? "" : " - not created yet") + ")" : "";
     $("#hint-" + name).textContent = HINTS[name] || "";
   }
@@ -1334,6 +1345,15 @@ async function runUfwPreview() {
       html += "<div class='notice err'>The admin SSH port (" + esc(d.adminSshPort) +
         ") would end up with NO allow/limit rule - check Trusted Hosts is not empty. Apply is blocked until this is fixed.</div>";
     }
+    const lockout = d.sshdLockout || [];
+    if (lockout.length) {
+      html += "<div class='notice err'>This would remove the only rule for " +
+        esc(Array.from(new Set(lockout.map((r) => r.to))).join(", ")) +
+        ", where sshd is listening right now. Move sshd to the new admin port first. Apply is blocked until then.</div>";
+    } else if (d.sshdPorts === null && d.diff.toRemove.length) {
+      html += "<div class='notice warn'>Could not check which ports sshd is listening on (the ss command failed). " +
+        "Make sure none of the removals below is the port you manage this server over.</div>";
+    }
     html += "<div class='notice warn'>" + (d.diff.toAdd.length + d.diff.toRemove.length) + " change(s) would apply.</div>";
     if (d.diff.toAdd.length) {
       html += "<div style='font-weight:600;margin:8px 0 4px'>Would add</div>" + d.diff.toAdd.map(ufwRuleLine).join("");
@@ -1342,7 +1362,7 @@ async function runUfwPreview() {
       html += "<div style='font-weight:600;margin:8px 0 4px'>Would remove</div>" + d.diff.toRemove.map(ufwRuleLine).join("");
     }
     out.innerHTML = html;
-    lastUfwHadChanges = d.adminRuleOk !== false;
+    lastUfwHadChanges = d.adminRuleOk !== false && !lockout.length;
     applyBtn.disabled = !lastUfwHadChanges;
   } catch (e) {
     out.innerHTML = "<div class='notice err'>Request failed: " + esc(e.message) + "</div>";
@@ -2197,6 +2217,9 @@ function collect() {
       apihosts: $("#ta-apihosts").value,
       statushosts: $("#ta-statushosts").value,
     },
+    // Each list as this page loaded it: the server only rewrites the lists
+    // that were edited, and keeps lines added on disk since (auto-blocks).
+    filesBase: Object.fromEntries(Object.entries(DATA.files || {}).map(([k, v]) => [k, v.content || ""])),
   };
 }
 
@@ -3898,10 +3921,25 @@ function renderSecurityMain() {
   }
 }
 
-async function startMfaSetup() {
-  var r = await api("api/security/mfa/setup", {});
-  if (!(r.ok && r.data && r.data.ok)) { secNotice((r.data && r.data.error) || "Could not start MFA setup."); return; }
-  renderMfaSetupQr(r.data.secret, r.data.otpauthUrl);
+// Asks for the current password first - the server requires it, so a session
+// cookie alone can't enroll a new authenticator.
+function startMfaSetup() {
+  modalOpen(
+    '<h3 style="margin-top:0">Enable MFA</h3>' +
+    '<div id="sec-notice"></div>' +
+    '<p class="muted">Confirm your current password to continue.</p>' +
+    '<div class="field"><label for="sec-mfa-pw">Current password</label><input id="sec-mfa-pw" type="password" autocomplete="current-password" autofocus></div>' +
+    '<div class="row" style="justify-content:flex-end">' +
+    '<button id="sec-back" type="button">Back</button>' +
+    '<button class="primary" id="sec-mfa-start" type="button">Continue</button>' +
+    "</div>"
+  );
+  $("#sec-back").addEventListener("click", renderSecurityMain);
+  $("#sec-mfa-start").addEventListener("click", async () => {
+    var r = await api("api/security/mfa/setup", { currentPassword: $("#sec-mfa-pw").value });
+    if (!(r.ok && r.data && r.data.ok)) { secNotice((r.data && r.data.error) || "Could not start MFA setup."); return; }
+    renderMfaSetupQr(r.data.secret, r.data.otpauthUrl);
+  });
 }
 
 function renderMfaSetupQr(secret, otpauthUrl) {

@@ -36,10 +36,11 @@ class ProxyConnection {
 
     // Auto-block trigger scanning — telnet only (an encrypted SSH passthrough
     // stream has nothing plaintext to match). Disabled for whitelisted IPs in
-    // connect(). this.triggerBuf holds the first TRIGGER_SCAN_BYTES the client
-    // sends; once it fills, scanning stops for the rest of the session.
+    // connect(). this.triggerScanner (ipfilter.createTriggerScanner) covers the
+    // first TRIGGER_SCAN_BYTES the client sends; once it fills, scanning stops
+    // for the rest of the session.
     this.triggerScan = config.triggerBlock.enabled && (options.proxyName || 'telnet') === 'telnet';
-    this.triggerBuf = null;
+    this.triggerScanner = null;
 
     // Per-proxy behavior. The SSH passthrough forwards encrypted bytes, so it
     // disables encoding detection and defaults PROXY Protocol off.
@@ -57,15 +58,24 @@ class ProxyConnection {
     return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
   }
 
+  // Drop a refused caller now. end() only half-closed the socket and then
+  // waited for the caller to close its side, and server.js releases the
+  // connection slot on 'close' - so a blocked caller that simply never hung
+  // up held a MAX_CONNECTIONS slot until CONNECTION_TIMEOUT (forever at 0).
+  // Nothing is ever sent to a refused caller, so there is nothing to flush.
+  rejectClient() {
+    this.clientSocket.on('error', (err) => {
+      this.log.debug(`[${this.connectionId}] Client socket error during rejection: ${err.message}`);
+    });
+    this.clientSocket.destroy();
+  }
+
   connect() {
     const clientIp = this.clientSocket.remoteAddress;
 
     if (!clientIp) {
       this.log.blocked(`[${this.connectionId}] Connection rejected: unable to determine client IP`);
-      this.clientSocket.on('error', (err) => {
-        this.log.debug(`[${this.connectionId}] Client socket error during rejection: ${err.message}`);
-      });
-      this.clientSocket.end();
+      this.rejectClient();
       return;
     }
 
@@ -80,10 +90,7 @@ class ProxyConnection {
       const filterResult = ipFilter.shouldAllowConnection(clientIp);
       if (!filterResult.allowed) {
         this.log.blocked(`[${this.connectionId}] Connection blocked by IP filter: ${filterResult.reason}`);
-        this.clientSocket.on('error', (err) => {
-          this.log.debug(`[${this.connectionId}] Client socket error during rejection: ${err.message}`);
-        });
-        this.clientSocket.end();
+        this.rejectClient();
         return;
       }
       isWhitelisted = filterResult.whitelisted || false;
@@ -94,20 +101,14 @@ class ProxyConnection {
     // Check per-IP concurrent connection limit (whitelisted IPs are exempt)
     if (!isWhitelisted && ipFilter && ipFilter.isConnectionLimitExceeded(clientIp)) {
       this.log.blocked(`[${this.connectionId}] Connection rejected: per-IP limit reached for ${clientIp}`);
-      this.clientSocket.on('error', (err) => {
-        this.log.debug(`[${this.connectionId}] Client socket error during rejection: ${err.message}`);
-      });
-      this.clientSocket.end();
+      this.rejectClient();
       return;
     }
 
     // Check country blocking (whitelisted IPs are exempt)
     if (!isWhitelisted && this.shouldBlockConnection(clientIp)) {
       this.log.blocked(`[${this.connectionId}] Connection blocked by country filter`);
-      this.clientSocket.on('error', (err) => {
-        this.log.debug(`[${this.connectionId}] Client socket error during rejection: ${err.message}`);
-      });
-      this.clientSocket.end();
+      this.rejectClient();
       return;
     }
 
@@ -220,22 +221,19 @@ class ProxyConnection {
   setupPipes() {
     this.clientSocket.on('data', (data) => {
       if (this.triggerScan) {
-        const cap = config.triggerBlock.scanBytes;
-        this.triggerBuf = this.triggerBuf ? Buffer.concat([this.triggerBuf, data]) : Buffer.from(data);
-        if (this.triggerBuf.length > cap) this.triggerBuf = this.triggerBuf.subarray(0, cap);
-
         const ipFilter = getIPFilter();
-        const hit = ipFilter && ipFilter.matchTrigger(this.triggerBuf.toString('latin1'));
+        if (!this.triggerScanner && ipFilter) this.triggerScanner = ipFilter.createTriggerScanner(config.triggerBlock.scanBytes);
+        const hit = this.triggerScanner && this.triggerScanner.feed(data);
         if (hit) {
           this.log.blocked(`[${this.connectionId}] Auto-block ${this.clientIp}: matched trigger ${JSON.stringify(hit)}`);
-          if (ipFilter) ipFilter.autoBlockIP(this.clientIp, hit);
+          ipFilter.autoBlockIP(this.clientIp, hit);
           metrics.incTriggerBlock();
           this.cleanup('trigger-block');
           return; // do not forward the offending bytes
         }
-        if (this.triggerBuf.length >= cap) {
+        if (!this.triggerScanner || this.triggerScanner.full) {
           this.triggerScan = false;
-          this.triggerBuf = null;
+          this.triggerScanner = null;
         }
       }
 

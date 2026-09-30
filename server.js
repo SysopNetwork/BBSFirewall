@@ -178,7 +178,8 @@ class BBSFirewall {
       const log = logger.getLogger(proxyName);
       log.blocked(`Connection rejected: max connections (${config.maxConnections}) reached`);
       metrics.incRejected();
-      clientSocket.end();
+      clientSocket.on('error', () => {});
+      clientSocket.destroy(); // see ProxyConnection.rejectClient()
       return;
     }
 

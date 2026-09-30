@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
 const { WORDS } = require('./wordlist');
 
 const STORE_PATH = path.join(__dirname, '.admin-security.json');
@@ -93,7 +94,11 @@ function normalizeAccount(a) {
   if (!a.mfa) a.mfa = { enabled: false, secret: null, pendingSecret: null, confirmedAt: null };
   if (!Array.isArray(a.backupCodes)) a.backupCodes = [];
   if (LEGACY_ROLES[a.role]) a.role = LEGACY_ROLES[a.role];
-  if (!ROLES.includes(a.role)) a.role = 'master_admin';
+  // No role at all = an account from before roles existed, which had full
+  // access. A role that is present but unrecognised (hand-edited, corrupted)
+  // gets the LEAST access, never the most.
+  if (a.role === undefined || a.role === null || a.role === '') a.role = 'master_admin';
+  else if (!ROLES.includes(a.role)) a.role = 'firewall_admin';
   // Per-account MFA policy (v1.4): defaults to false (optional, the original
   // behavior) for any account predating this field.
   if (typeof a.mfaRequired !== 'boolean') a.mfaRequired = false;
@@ -346,6 +351,73 @@ function verifyPassword(plain, record) {
 }
 
 // ---------------------------------------------------------------------------
+// Async scrypt for the config editor. It runs inside the firewall process,
+// where every telnet/SSH session shares one event loop: a sync check is ~30ms
+// per password and ~250ms per backup-code attempt (8 hashes) of frozen
+// traffic. crypto.scrypt runs on the libuv threadpool instead. The sync
+// versions above stay for the CLI scripts.
+//
+// Callers must not hold an account object across these awaits and write it
+// back afterwards - another request can change the store meanwhile (consume a
+// backup code, record a TOTP step), and writing the stale copy would undo it.
+// Verify first, then readSecrets() fresh and write synchronously.
+// ---------------------------------------------------------------------------
+const scryptAsync = util.promisify(crypto.scrypt);
+
+async function hashPasswordAsync(plain) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = (await scryptAsync(String(plain), salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })).toString('hex');
+  return { algo: 'scrypt', hash, salt, N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, keylen: SCRYPT_KEYLEN };
+}
+
+async function verifyPasswordAsync(plain, record) {
+  if (!record || record.algo !== 'scrypt') return false;
+  try {
+    const candidate = (await scryptAsync(String(plain), record.salt, record.keylen,
+      { N: record.N, r: record.r, p: record.p })).toString('hex');
+    return timingSafeEqualStr(candidate, record.hash);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function hashBackupCodeAsync(code) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = (await scryptAsync(normalizeCode(code), salt, BACKUP_CODE_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })).toString('hex');
+  return { hash, salt, usedAt: null };
+}
+
+async function matchesBackupCodeHashAsync(code, record) {
+  if (!record || record.usedAt) return false;
+  try {
+    const candidate = (await scryptAsync(normalizeCode(code), record.salt, BACKUP_CODE_KEYLEN,
+      { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })).toString('hex');
+    return timingSafeEqualStr(candidate, record.hash);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Async twin of verifyAndConsumeBackupCode(). The hashing is awaited, so two
+// requests can present the same code at once: the consume step re-reads the
+// store and only succeeds if that code is still unused there, checking and
+// writing with no await in between - a code can never be spent twice.
+async function verifyAndConsumeBackupCodeAsync(username, code) {
+  const account = readSecrets(username);
+  if (!account || !Array.isArray(account.backupCodes)) return false;
+  const matches = await Promise.all(account.backupCodes.map((r) => matchesBackupCodeHashAsync(code, r)));
+  const idx = matches.indexOf(true);
+  if (idx === -1) return false;
+
+  const fresh = readSecrets(username);
+  const rec = fresh && fresh.backupCodes[idx];
+  if (!rec || rec.usedAt || rec.hash !== account.backupCodes[idx].hash) return false;
+  rec.usedAt = Date.now();
+  writeSecrets(fresh);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // TOTP (RFC 6238) on top of HOTP (RFC 4226) - HMAC-SHA1, 30s step, 6 digits
 // ---------------------------------------------------------------------------
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -506,6 +578,10 @@ module.exports = {
   setMfaRequired,
   hashPassword,
   verifyPassword,
+  hashPasswordAsync,
+  verifyPasswordAsync,
+  hashBackupCodeAsync,
+  verifyAndConsumeBackupCodeAsync,
   generateTotpSecret,
   verifyTotp,
   otpauthUrl,

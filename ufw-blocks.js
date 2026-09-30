@@ -17,7 +17,8 @@
  * Safety rails (a deny rule covers EVERY port, including the admin's SSH):
  *   - refuses to push anything while trustedhosts.txt is empty — without it
  *     there is nothing to protect the admin's own address with
- *   - never pushes an entry that overlaps a trusted host, a whitelist entry,
+ *   - never pushes an entry that overlaps a trusted host (Trusted Hosts, the
+ *     Status allowlist, or the API allowlist when the API is on), a whitelist entry,
  *     or loopback — the whole overlap is skipped, not just the shared part,
  *     and each skip is reported so the sysop can see why
  *   - caps the number of pushed rules (UFW_BLOCK_MAX_RULES); over the cap,
@@ -89,7 +90,7 @@ function computeDesiredBlocks(snapshot, protect, opts) {
     if (desired.has(key)) return;
 
     if (protectedEntries.some((p) => entriesOverlap(entry, p))) {
-      skippedProtected.push({ source, reason: 'overlaps a trusted host or loopback' });
+      skippedProtected.push({ source, reason: 'overlaps a Trusted Hosts / Status / API allowlist entry or loopback' });
       return;
     }
     if (whitelistEntries.some((w) => entriesOverlap(entry, w))) {
@@ -111,6 +112,17 @@ function computeDesiredBlocks(snapshot, protect, opts) {
   for (let i = ips.length - 1; i >= 0; i--) consider(ips[i], 'ip'); // newest first
 
   return { desired, skippedProtected, skippedOverCap, skippedIpv6, skippedInvalid, skippedCovered };
+}
+
+// Every address BBSFirewall itself is configured to let in on the editor port:
+// Trusted Hosts, the GET /status monitors, and (when the API is on) API
+// callers. A kernel deny covers every port, so one of these landing on the
+// blocklist (an auto-block from a shared address, say) would otherwise
+// silently cut off an uptime monitor or dashboard the app still allows.
+function protectedHostEntries() {
+  const lists = [config.configEditor.trustedHostsPath, config.status.trustedHostsPath];
+  if (config.api && config.api.enabled) lists.push(config.api.trustedHostsPath);
+  return lists.flatMap((p) => trustedhosts.loadTrustedHosts(p).entries);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +213,7 @@ async function syncOnce() {
     return result;
   }
 
-  const computed = computeDesiredBlocks(ipFilter.getKernelBlockSnapshot(), trusted.entries, {
+  const computed = computeDesiredBlocks(ipFilter.getKernelBlockSnapshot(), protectedHostEntries(), {
     maxRules: config.ufw.maxBlockRules,
     ipv6Supported: ufw.hasIpv6Support(),
   });
@@ -335,6 +347,7 @@ async function removeAll() {
 module.exports = {
   computeDesiredBlocks,
   entriesOverlap,
+  protectedHostEntries,
   start,
   stop,
   requestSync,

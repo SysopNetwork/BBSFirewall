@@ -7,6 +7,18 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 const trustedhosts = require('./trustedhosts');
+const { canonicalSource } = require('./ufw');
+
+// One spelling per address for the exact-IP Sets. They are matched by string,
+// and IPv6 has many spellings of one address ("2001:DB8:0::1" = "2001:db8::1"),
+// so a list entry written any way but Node's own never matched a caller - while
+// ufw-blocks.js, which canonicalizes, still pushed it to the kernel. Anything
+// that isn't a single parseable address is returned unchanged.
+function canonicalIp(ip) {
+  const entry = trustedhosts.parseEntry(ip);
+  if (!entry || entry.prefix !== entry.bits) return ip;
+  return canonicalSource(entry);
+}
 
 // IPv4 and IPv6, via trustedhosts.js's address parsing (BigInt-based, already
 // handles both families correctly). This used to be a hand-rolled IPv4-only
@@ -68,6 +80,22 @@ function compileTrigger(raw) {
 const NESTED_QUANT_RE =
   /(\([^()]*[*+][^()]*\)|\[[^\]]*[*+][^\]]*\]|\([^()]*\)[*+])[*+{]/;
 
+// Two more exponential shapes NESTED_QUANT_RE alone let through:
+//   - a quantifier nested through extra parentheses:  ((a+))+   (?:(\d+))*
+//   - a repeated group with alternation, whose branches can overlap:
+//     (a|aa)+  (\w|\d)*  - overlap can't be judged statically, so any
+//     repeated alternation is refused; (GET|POST) with no repeat is fine.
+const NESTED_THROUGH_PARENS_RE = /[*+}]\)+[*+{]/;
+const REPEATED_ALTERNATION_RE = /\([^()]*\|[^()]*\)[*+{]/;
+
+// Static check only - never run an untrusted regex to find out.
+function looksCatastrophic(source) {
+  return source.length > 400 ||
+    NESTED_QUANT_RE.test(source) ||
+    NESTED_THROUGH_PARENS_RE.test(source) ||
+    REPEATED_ALTERNATION_RE.test(source);
+}
+
 // Compile-check trigger text and flag patterns that will not parse or that
 // look like a ReDoS. Used by the config editor before it writes triggers.txt.
 function validateTriggerText(text) {
@@ -82,7 +110,7 @@ function validateTriggerText(text) {
     count++;
     if (c.kind === 'regex') {
       const body = c.re.source;
-      if (body.length > 400 || NESTED_QUANT_RE.test(body)) slow.push(t);
+      if (looksCatastrophic(body)) slow.push(t);
     }
   }
   return { count, invalid, slow };
@@ -176,7 +204,7 @@ class IPFilter {
           }
           this.whitelistCidr.push(token);
         } else {
-          this.whitelist.add(token);
+          this.whitelist.add(canonicalIp(token));
         }
         count++;
       }
@@ -212,7 +240,7 @@ class IPFilter {
           }
           this.blocklistCidr.push(token);
         } else {
-          this.blocklist.add(token);
+          this.blocklist.add(canonicalIp(token));
         }
         count++;
       }
@@ -261,8 +289,7 @@ class IPFilter {
         // Same ReDoS guard the config editor applies on save — a hand-edited
         // triggers.txt bypasses that path, and matchTrigger() runs every
         // pattern against every caller's first bytes.
-        if (compiled.kind === 'regex' &&
-            (compiled.re.source.length > 400 || NESTED_QUANT_RE.test(compiled.re.source))) {
+        if (compiled.kind === 'regex' && looksCatastrophic(compiled.re.source)) {
           slow++;
           continue;
         }
@@ -301,11 +328,58 @@ class IPFilter {
     return null;
   }
 
+  // Per-connection scanner over the caller's first `cap` bytes. feed() each
+  // chunk as it arrives; returns the matching trigger's raw text or null.
+  // Rebuilding and rescanning the whole buffer on every chunk was quadratic:
+  // measured ~2s of main-thread CPU for one caller trickling 64KB a byte at a
+  // time. Plain triggers now search only a window of the new bytes plus the
+  // (longest trigger - 1) chars before them - enough to catch a match split
+  // across chunks, and earlier text already failed. (Searching the whole
+  // growing string instead is still quadratic: V8 re-flattens a string built
+  // with += on every search.) A regex can match across any span, so the full
+  // text is kept - only when regex triggers exist - and they test all of it.
+  createTriggerScanner(cap) {
+    let seen = 0;
+    let tail = '';       // last (longest plain trigger - 1) lowercased chars
+    let text = null;     // full text, built only for regex triggers
+    const scanner = {
+      full: false,
+      feed: (data) => {
+        if (scanner.full) return null;
+        const piece = data.subarray(0, cap - seen).toString('latin1');
+        seen += piece.length;
+        if (seen >= cap) scanner.full = true;
+
+        let maxLit = 1;
+        let hasRegex = false;
+        for (const t of this.triggers) {
+          if (t.kind === 'substr') maxLit = Math.max(maxLit, t.lit.length);
+          else hasRegex = true;
+        }
+        // latin1 lowercases char-for-char, so lowercasing per piece is exact
+        const window = tail + piece.toLowerCase();
+        tail = maxLit > 1 ? window.slice(-(maxLit - 1)) : '';
+        if (hasRegex) text = (text || '') + piece;
+
+        for (const t of this.triggers) {
+          if (t.kind === 'substr') {
+            if (window.includes(t.lit)) return t.raw;
+          } else {
+            t.re.lastIndex = 0;
+            if (t.re.test(text)) return t.raw;
+          }
+        }
+        return null;
+      },
+    };
+    return scanner;
+  }
+
   // Blacklist an IP that tripped a trigger. Mode 'blocklist' adds it to
   // blocklist.txt (and memory) permanently; mode 'temp' is an in-memory block
   // for TRIGGER_BLOCK_DURATION_MS. Whitelisted IPs are never blocked.
   autoBlockIP(ipAddress, triggerRaw) {
-    const cleanIp = (ipAddress || '').replace(/^::ffff:/i, '');
+    const cleanIp = canonicalIp((ipAddress || '').replace(/^::ffff:/i, ''));
     if (!cleanIp) return { blocked: false };
     if (this.isIPWhitelisted(ipAddress)) return { blocked: false, whitelisted: true };
 
@@ -346,7 +420,7 @@ class IPFilter {
 
     const cleanIp = ipAddress.replace(/^::ffff:/i, '');
 
-    if (this.whitelist.has(cleanIp) || this.whitelist.has(ipAddress)) return true;
+    if (this.whitelist.has(canonicalIp(cleanIp)) || this.whitelist.has(ipAddress)) return true;
 
     for (const entry of this.whitelistCidr) {
       if (ipMatchesCIDR(cleanIp, entry)) return true;
@@ -360,7 +434,7 @@ class IPFilter {
 
     const cleanIp = ipAddress.replace(/^::ffff:/i, '');
 
-    if (this.blocklist.has(cleanIp) || this.blocklist.has(ipAddress)) return true;
+    if (this.blocklist.has(canonicalIp(cleanIp)) || this.blocklist.has(ipAddress)) return true;
 
     for (const entry of this.blocklistCidr) {
       if (ipMatchesCIDR(cleanIp, entry)) return true;

@@ -35,8 +35,66 @@ entry — see the git history for changes before v1.3.5.
   `.zip` with "Download all (.zip)" (`GET /api/logs/download-all`). Streamed, so
   a big log folder doesn't use extra memory.
 
+### 🔒 Security
+
+- **Firewall Admin accounts can no longer change who can reach the editor.** The
+  Config Editor, Management API and Host Firewall (UFW) settings, every list-file
+  path, and the Trusted Hosts / API / Status allowlists are now Global Admin only —
+  shown read-only to a Firewall Admin and refused by the server. A Firewall Admin
+  could previously set their own API key (which outlives their account) or lock
+  the Global Admin out.
+- **List-file paths and `LOG_DIR` must stay inside the BBSFirewall folder**, and
+  list files must be `.txt`. A changed path outside it is refused — it previously
+  let one Save write any file on the host as root.
+- **Turning MFA on asks for your current password**, and MFA setup is refused
+  while MFA is already on (disable it first to replace an authenticator). A stolen
+  session cookie could previously swap in its own authenticator.
+- Login and MFA lockouts now count attempts that arrive at the same moment; the
+  password and backup-code checks no longer pause every connected caller.
+- Caller-supplied text (e.g. an SSH username) can no longer forge lines in the log
+  files or console output.
+- A role name that isn't recognised now gets the least access, not the most.
+- Trigger regexes with repeated alternation `(a|aa)+` or nested groups `((a+))+`
+  are now refused as catastrophic-backtracking risks, like `(a+)+` already was.
+
 ### 🐛 Fixed
 
+- **Saving no longer drops auto-blocks.** Save used to rewrite every list file
+  from what the page loaded, silently deleting trigger auto-blocks (and "Whitelist
+  my IP") added since. Only lists you actually edited are written now, keeping any
+  lines added on disk meanwhile; if a list changed on disk any other way, nothing
+  is saved and you're asked to reload.
+- Settings containing `\` or `"` (e.g. an API key) were saved in a form the
+  firewall read back differently from what was typed. Values now load exactly as
+  entered.
+- A blocked caller that never hung up kept a connection slot until
+  `CONNECTION_TIMEOUT` (forever at 0); refused connections are now dropped at once.
+- SSH (terminate mode) now counts against `MAX_CONNECTIONS`, honours
+  `CONNECTION_TIMEOUT` (idle = no session data; SSH keepalives don't count), and allows one BBS shell per SSH connection — one caller
+  could previously open unlimited BBS sessions over a single connection.
+- SSH (terminate mode) now acts as a proper telnet client toward the BBS: the
+  backend's option negotiation no longer shows up as stray characters (e.g.
+  `√♥ √☺ √ ²` before the first screen), and 0xFF bytes are escaped/unescaped
+  correctly in both directions instead of being corrupted.
+- Self-update and rollback no longer freeze every telnet/SSH session while
+  `npm install` runs. A rollback no longer restores an old `status-trustedhosts.txt`
+  or copies admin-account backups around, and a pre-release tag (`v1.5.0-beta.9`)
+  can be pinned.
+- An interrupted "Download all (.zip)" no longer leaves the download stuck — two of
+  them used to block all further zip downloads until a restart.
+- IPv6 whitelist/blocklist entries now match however they're written
+  (`2001:DB8:0::1` = `2001:db8::1`).
+- Trigger scanning no longer re-scans everything received so far on every
+  packet (about 2 s of CPU per caller at a 64 KB `TRIGGER_SCAN_BYTES`).
+- Kernel block push never denies an address in the Status or API allowlists.
+- UFW Apply refuses to remove the only rule for a port sshd is listening on (e.g.
+  after changing Admin SSH port before moving sshd).
+- Changing a list's path now starts the new file with the current list, and
+  editing that list in the same Save is refused (it went to the old file).
+- System Stats, log Follow and UFW sync polling no longer keep an idle session
+  signed in forever.
+- The plain-HTTP redirect only echoes a well-formed `Host` header; a log file
+  deleted mid-download returns 404 instead of an error.
 - After "Restart firewall" (and self-update / reboot), the editor could reload
   while the old process was still shutting down and come up empty — no settings,
   no version — until a manual refresh. It now waits for the new process before

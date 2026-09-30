@@ -16,6 +16,7 @@ const { getIPFilter } = require('./ipfilter');
 const { getGeoIP } = require('./geoip');
 const { detectFromSSHEnvironment, detectFromTerminalType, getBackendPortForEncoding } = require('./encoding-detector');
 const { buildHeader: buildProxyHeader } = require('./proxy-protocol');
+const { createTelnetClient } = require('./telnet-filter');
 
 const log = logger.getLogger('ssh');
 
@@ -49,7 +50,11 @@ function shouldBlockByCountry(config, ipAddress) {
   return false;
 }
 
-function createSSHServer(config) {
+// `tracker` is the BBSFirewall instance (server.js): SSH connections count
+// against the same activeConnections / MAX_CONNECTIONS as telnet and SSH
+// passthrough, which go through its handleNewConnection(). Terminate mode used
+// to bypass that entirely - no global cap, no idle timeout.
+function createSSHServer(config, tracker) {
   if (config.sshMode !== 'terminate') {
     return null;
   }
@@ -86,6 +91,13 @@ function createSSHServer(config) {
 
       log.connection(`SSH client connected from ${clientIP}`);
 
+      if (tracker && tracker.activeConnections >= config.maxConnections) {
+        log.blocked(`SSH connection rejected: max connections (${config.maxConnections}) reached`);
+        metrics.incRejected();
+        client.end();
+        return;
+      }
+
       const ipFilter = getIPFilter();
       let sshConnectionTracked = false;
       let sshWhitelisted = false;
@@ -117,6 +129,35 @@ function createSSHServer(config) {
         ipFilter.trackConnectionOpen(clientIP);
         sshConnectionTracked = true;
       }
+
+      // All checks passed - take a global connection slot, released on close.
+      let globalSlotTaken = false;
+      if (tracker) {
+        tracker.activeConnections++;
+        metrics.incActive('ssh');
+        globalSlotTaken = true;
+      }
+
+      // Same idle timeout the telnet side applies (server.js handleNewConnection).
+      // Not socket.setTimeout(): ssh2 pings the client every 15s on its own
+      // (keepalive@openssh.com) and each ping write resets a socket timer, so it
+      // never fires. Only session data in either direction counts as activity -
+      // noteActivity() is called from the shell stream/backend data handlers.
+      let idleTimer = null;
+      const noteActivity = () => { if (idleTimer) idleTimer.refresh(); };
+      if (config.connectionTimeout > 0 && client._sock) {
+        idleTimer = setTimeout(() => {
+          log.info(`SSH connection timeout for ${clientIP}`);
+          client._sock.destroy();
+        }, config.connectionTimeout);
+        client.on('close', () => clearTimeout(idleTimer));
+      }
+
+      // One BBS shell at a time per SSH connection. Each shell opens its own
+      // backend connection, so unlimited shell channels on one connection let a
+      // single caller (any credentials, one per-IP slot) open unlimited BBS
+      // sessions.
+      let shellOpen = false;
 
       client.on('authentication', (ctx) => {
         log.info(`SSH auth from ${clientIP} (user: ${ctx.username})`);
@@ -194,6 +235,12 @@ function createSSHServer(config) {
               return;
             }
 
+            if (shellOpen) {
+              log.blocked(`SSH client ${clientIP}: refused a second concurrent shell on one connection`);
+              if (typeof reject === 'function') reject();
+              return;
+            }
+            shellOpen = true;
             const stream = accept();
             log.connection(`SSH shell session started for ${clientIP}`);
 
@@ -210,6 +257,12 @@ function createSSHServer(config) {
             const backendSocket = new net.Socket();
             backendSocket.setNoDelay(true);
             backendSocket.setKeepAlive(true, 30000);
+
+            // The backend speaks telnet and the caller speaks SSH - answer its
+            // negotiation here and keep telnet commands off the caller's screen.
+            const telnet = createTelnetClient((reply) => {
+              if (backendSocket.writable && !backendSocket.destroyed) backendSocket.write(reply);
+            });
 
             // Pause the SSH stream until the backend is connected and the
             // PROXY header has been written, so it is always first in the
@@ -253,25 +306,23 @@ function createSSHServer(config) {
             let bytesFromBackend = 0;
 
             let triggerScan = !!(config.triggerBlock && config.triggerBlock.enabled) && !sshWhitelisted;
-            let triggerBuf = null;
+            let triggerScanner = null; // see ipfilter.createTriggerScanner
 
             stream.on('data', (data) => {
+              noteActivity();
               if (triggerScan) {
-                const cap = config.triggerBlock.scanBytes;
-                triggerBuf = triggerBuf ? Buffer.concat([triggerBuf, data]) : Buffer.from(data);
-                if (triggerBuf.length > cap) triggerBuf = triggerBuf.subarray(0, cap);
-
                 const ipf = getIPFilter();
-                const hit = ipf && ipf.matchTrigger(triggerBuf.toString('latin1'));
+                if (!triggerScanner && ipf) triggerScanner = ipf.createTriggerScanner(config.triggerBlock.scanBytes);
+                const hit = triggerScanner && triggerScanner.feed(data);
                 if (hit) {
                   log.blocked(`Auto-block ${clientIP}: shell input matched trigger ${JSON.stringify(hit)}`);
-                  if (ipf) ipf.autoBlockIP(clientIP, hit);
+                  ipf.autoBlockIP(clientIP, hit);
                   metrics.incTriggerBlock();
                   stream.end();
                   if (!backendSocket.destroyed) backendSocket.destroy();
                   return;
                 }
-                if (triggerBuf.length >= cap) { triggerScan = false; triggerBuf = null; }
+                if (!triggerScanner || triggerScanner.full) { triggerScan = false; triggerScanner = null; }
               }
 
               bytesFromClient += data.length;
@@ -282,7 +333,7 @@ function createSSHServer(config) {
                 return;
               }
 
-              if (!backendSocket.write(data)) {
+              if (!backendSocket.write(telnet.toBackend(data))) {
                 log.debug('Backend buffer full, pausing SSH stream');
                 stream.pause();
                 backendSocket.once('drain', () => {
@@ -292,9 +343,12 @@ function createSSHServer(config) {
               }
             });
 
-            backendSocket.on('data', (data) => {
-              bytesFromBackend += data.length;
-              metrics.incBytes('fromBackend', data.length);
+            backendSocket.on('data', (raw) => {
+              bytesFromBackend += raw.length;
+              metrics.incBytes('fromBackend', raw.length);
+              const data = telnet.fromBackend(raw);
+              if (data.length === 0) return; // negotiation only
+              noteActivity();
 
               if (!stream.writable || stream.destroyed) {
                 log.debug(`SSH stream not writable, dropping ${data.length} bytes`);
@@ -322,6 +376,7 @@ function createSSHServer(config) {
             });
 
             stream.on('close', () => {
+              shellOpen = false;
               log.connection(`SSH stream closed for ${clientIP}. Bytes: client→backend=${bytesFromClient}, backend→client=${bytesFromBackend}`);
               if (!backendSocket.destroyed) backendSocket.destroy();
             });
@@ -354,6 +409,11 @@ function createSSHServer(config) {
 
       client.on('close', () => {
         log.connection(`SSH client ${clientIP} disconnected`);
+        if (globalSlotTaken) {
+          globalSlotTaken = false;
+          tracker.activeConnections--;
+          metrics.decActive('ssh');
+        }
         if (sshConnectionTracked) {
           const ipFilter = getIPFilter();
           if (ipFilter) ipFilter.trackConnectionClose(clientIP);
@@ -366,7 +426,7 @@ function createSSHServer(config) {
 }
 
 function startSSHServer(config, activeConnectionsTracker) {
-  const server = createSSHServer(config);
+  const server = createSSHServer(config, activeConnectionsTracker);
 
   if (!server) {
     return null;

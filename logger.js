@@ -27,7 +27,8 @@ const currentLevel = LOG_LEVELS[config.logLevel] || LOG_LEVELS.info;
 function emit(level, message, data = null) {
   if (LOG_LEVELS[level] >= currentLevel) {
     const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
+    // Same forged-line protection as the file logs (file-logger.escapeControl).
+    const logMessage = `[${timestamp}] [${level.toUpperCase()}] ${fileLogger.escapeControl(message, true)}`;
 
     if (data) {
       console.log(logMessage, data);

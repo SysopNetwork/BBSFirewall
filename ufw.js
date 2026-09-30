@@ -300,6 +300,47 @@ function diffRules(current, desired) {
 }
 
 // ---------------------------------------------------------------------------
+// sshd lockout guard. The admin-port rail (config-editor.js adminRuleOk) only
+// checks the CONFIGURED HOST_ADMIN_SSH_PORT. Change that setting before sshd
+// has actually moved and the diff deletes the only rule for the port sshd is
+// really on. So ask the host which ports sshd listens on, and refuse any
+// removal that would leave one of them with no BBSFirewall rule at all.
+// ---------------------------------------------------------------------------
+
+// `ss -Htlnp` lines: "LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1,fd=3))"
+function parseSshdPorts(ssOutput) {
+  const ports = new Set();
+  for (const line of String(ssOutput || '').split('\n')) {
+    if (!/"sshd"/.test(line)) continue;
+    const cols = line.trim().split(/\s+/);
+    const local = cols[3] || '';
+    const port = parseInt(local.slice(local.lastIndexOf(':') + 1), 10);
+    if (port > 0 && port < 65536) ports.add(port);
+  }
+  return [...ports];
+}
+
+// Resolves to the port list, or null when it can't be determined (no `ss`,
+// not root) - callers then warn instead of claiming the check passed.
+async function listeningSshdPorts() {
+  try {
+    const { stdout } = await execFileAsync('ss', ['-Htlnp'], { timeout: 4000 });
+    return parseSshdPorts(stdout);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Removals in `diff` that would leave a live sshd port with no rule in `desired`.
+function sshdLockoutRemovals(diff, desired, sshdPorts) {
+  const keeps = new Set(desired.map((r) => r.to));
+  return diff.toRemove.filter((r) => {
+    const port = parseInt(r.to, 10);
+    return (sshdPorts || []).includes(port) && !keeps.has(r.to);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // apply - NOT wired into any endpoint or UI yet. Adds before it ever removes,
 // so there is never a window with no valid rule for a port both the old and
 // new desired state agree should be open. dryRun (default true) never shells
@@ -477,6 +518,9 @@ module.exports = {
   getCurrentRules,
   desiredRules,
   diffRules,
+  parseSshdPorts,
+  listeningSshdPorts,
+  sshdLockoutRemovals,
   applyDiff,
   getRecentLog,
   withUfwLock,

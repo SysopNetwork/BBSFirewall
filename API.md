@@ -249,8 +249,18 @@ Send only the keys you want to change. This is the exact body the editor UI send
 - `env` — object of `KEY: { value: string, enabled: boolean }`. Only keys the editor
   schema knows are applied; unknown keys are ignored. `enabled: false` comments the
   line out (its value is kept). Newlines in a value are rejected.
-- `files` — any of `whitelist`, `blocklist`, `trustedhosts`, `triggers`, `apihosts`.
-  The string is the **entire new file content**.
+- `files` — any of `whitelist`, `blocklist`, `trustedhosts`, `triggers`, `apihosts`,
+  `statushosts`. The string is the **entire new file content**.
+- `filesBase` (optional) — the same names, each set to the file's content as you last
+  read it (from `GET /api/config`). With it, a file whose text equals its base is left
+  alone, and lines added to the file on disk since you read it (trigger auto-blocks,
+  "Whitelist my IP") are kept after your text. If the file changed on disk in any other
+  way, nothing is saved and the response is `409` — read it again and redo the edit.
+  Without `filesBase`, the submitted text replaces the file outright.
+- List-file paths (`WHITELIST_PATH`, `BLOCKLIST_PATH`, `TRIGGER_LIST_PATH`,
+  `CONFIG_EDITOR_TRUSTEDHOSTS_PATH`, `API_TRUSTEDHOSTS_PATH`) must name a `.txt` file inside
+  the BBSFirewall folder, and `LOG_DIR` a folder inside it; a changed value outside that
+  is refused with `400`.
 - Both `env` and `files` are optional; `{"env":{},"files":{}}` is a valid no-op (it
   still makes a timestamped `.env` backup).
 
@@ -429,6 +439,7 @@ op is in flight).
 | `429` | `{"error":"Too many failed attempts. Try again later."}` | 5 bad keys from this IP in 15 min |
 | `429` | `{"error":"A \"save\" operation is already running — wait for it to finish."}` | Another mutating op (save/restart/geoip/sshkey/cert/logs delete) is in flight |
 | `400` | `{"errors":["…","…"]}` or `{"error":"…"}` | `POST /api/save` validation failed; `.env` was not changed (or was restored) |
+| `409` | `{"error":"blocklist changed on disk since this page loaded. …"}` | `POST /api/save` with `filesBase`: that list file changed on disk in a way that can't be merged; nothing was saved |
 | `400` | `{"error":"invalid log file name"}` or `{"error":"proxy and file are required"}` | `/api/logs/view` or `/api/logs/delete` got a `proxy`/`file` pair that isn't a well-formed, matching log filename |
 | `404` | `{"error":"Log file not found"}` | `/api/logs/view` or `/api/logs/delete` got a well-formed name that isn't on disk |
 | `404` | `{"error":"Not found"}` | Unknown `/api/*` path or wrong method |

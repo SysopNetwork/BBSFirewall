@@ -51,8 +51,25 @@ const FLAGS = 0x0008 | 0x0800; // bit 3: sizes/CRC in data descriptor; bit 11: U
 const METHOD_DEFLATE = 8;
 const VERSION = 20; // 2.0: deflate + data descriptors
 
+// Waits for 'drain' only while the client is still there. A response whose
+// client hung up never drains and never emits 'error' - it just closes - so
+// waiting on 'drain' alone left the whole download (and its caller's
+// concurrency slot and open file) pending forever.
 async function writeOut(out, buf) {
-  if (!out.write(buf)) await once(out, 'drain');
+  if (out.destroyed || out.writableEnded) throw new Error('client disconnected');
+  if (out.write(buf)) return;
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      out.off('drain', onDrain);
+      out.off('close', onGone);
+      out.off('error', onGone);
+    };
+    const onDrain = () => { cleanup(); resolve(); };
+    const onGone = () => { cleanup(); reject(new Error('client disconnected')); };
+    out.on('drain', onDrain);
+    out.on('close', onGone);
+    out.on('error', onGone);
+  });
 }
 
 /**
@@ -99,9 +116,16 @@ async function streamZip(out, entries) {
     src.on('data', (chunk) => { crc = crc32Update(crc, chunk); usize += chunk.length; });
     src.on('error', (err) => deflate.destroy(err));
     src.pipe(deflate);
-    for await (const chunk of deflate) {
-      csize += chunk.length;
-      await writeOut(out, chunk);
+    try {
+      for await (const chunk of deflate) {
+        csize += chunk.length;
+        await writeOut(out, chunk);
+      }
+    } finally {
+      // Leaving the loop early (client gone, read error) must not leave the
+      // log file open.
+      src.destroy();
+      deflate.destroy();
     }
     offset += csize;
     bytesIn += usize;
