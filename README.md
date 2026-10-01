@@ -9,6 +9,10 @@
        ╚═════╝ ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝
 ```
 
+<img width="1910" height="997" alt="screencapture-bfd1kmo-agignetwork-net-8443-login-2026-09-23-16_03_26" src="https://github.com/user-attachments/assets/2dc405c8-ad05-4029-9bff-d9ee4e176ee1" />
+
+https://youtu.be/gSbNv_pjzWY?si=bbbsoTLS9QL4ZygC
+
 **A lightweight TCP proxy firewall for BBS telnet connections, built with Node.js.**
 
 By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/SysopNetwork/BBSFirewall
@@ -799,12 +803,10 @@ there, not in a public issue.
 
 ---
 
-## Tips / Donations
+## 💖 Tips / Donations
 
-If BBSFirewall is useful to you, tips are appreciated:
-
-- **Cash App:** https://cash.app/$laudenbachm
-- **Ko-fi:** https://ko-fi.com/laudenbachm
+- **Cash App:** [$laudenbachm](https://cash.app/$laudenbachm)
+- **Ko-fi:** [ko-fi.com/laudenbachm](https://ko-fi.com/laudenbachm)
 
 ---
 
