@@ -39,9 +39,6 @@ update-backups/
 *.log
 logs/
 
-# Local tool configuration
-.claude/
-
 # OS files
 .DS_Store
 Thumbs.db

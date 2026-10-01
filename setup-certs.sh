@@ -149,7 +149,7 @@ fi
 # /etc/letsencrypt/live/$DOMAIN, which then made THIS script's own
 # post-check below fail with a misleading "certbot may have failed" (the
 # domains can be identical; it's the lineage NAME that must differ).
-# Confirmed live: passing --cert-name here makes certbot create a genuinely
+# Passing --cert-name here makes certbot create a genuinely
 # independent lineage regardless of any domain overlap with another one.
 CERTBOT_ARGS=(
   certonly
