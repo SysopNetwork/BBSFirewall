@@ -247,19 +247,22 @@ const config = {
   // Optional host-firewall (UFW) integration — reconciles a tagged subset of
   // the box's own `ufw` rules against this config (see ufw.js). Off by
   // default. Deliberately does NOT enable/disable ufw itself — that stays a
-  // one-time, sysop-driven step outside BBSFirewall. Phase 1 is preview/
-  // dry-run only; autoApply (phase 2) is a SEPARATE flag so a sysop can stay
-  // on manual-apply-forever if they don't trust auto-reconcile yet.
+  // one-time, sysop-driven step outside BBSFirewall. Changes are made from
+  // the Tools tab (Preview + Apply); autoApply is a SEPARATE flag so a sysop
+  // can stay on manual Apply if they prefer.
   ufw: {
     enabled: process.env.UFW_ENABLED === 'true',
     // The box's real admin SSH port (NOT necessarily SSH_LISTEN_PORT, which
     // is the BBS's own SSH front door — this is the port you manage the
     // HOST with). Required to enable UFW management at all; no inference.
     adminSshPort: process.env.HOST_ADMIN_SSH_PORT ? parseInt(process.env.HOST_ADMIN_SSH_PORT, 10) : null,
-    // Kernel-level rate limiting (ufw limit) on the admin port, on top of
-    // whatever the box's own sshd does. Off by default.
-    limitAdminSsh: process.env.UFW_LIMIT_ADMIN_SSH === 'true',
-    // Phase 2: auto-reconcile on save/startup instead of preview-only.
+    // UFW_LIMIT_ADMIN_SSH (ufw limit on the admin port) was removed: the port
+    // is already limited to Trusted Hosts, and ufw's fixed 6-in-30s limit
+    // locked admins out during ordinary reconnects. A leftover true is ignored
+    // with a warning at startup (server.js).
+    limitAdminSshIgnored: process.env.UFW_LIMIT_ADMIN_SSH === 'true',
+    // Apply automatically at startup and after each Save (config-editor.js
+    // runUfwAutoApply), with stricter rails than a manual Apply.
     autoApply: process.env.UFW_AUTO_APPLY === 'true',
     // Push blocklist.txt entries and trigger auto-blocks down as kernel-level
     // `ufw deny` rules (ufw-blocks.js), so blocked callers are dropped even
@@ -419,6 +422,14 @@ function validateConfig() {
   }
   if (config.ufw.pushBlocks && !config.ufw.enabled) {
     errors.push('UFW_PUSH_BLOCKS requires UFW_ENABLED=true');
+  }
+  // Auto-apply runs inside the config editor, which loads the Trusted Hosts
+  // lists the rules are built from.
+  if (config.ufw.autoApply && !config.ufw.enabled) {
+    errors.push('UFW_AUTO_APPLY requires UFW_ENABLED=true');
+  }
+  if (config.ufw.autoApply && !config.configEditor.enabled) {
+    errors.push('UFW_AUTO_APPLY requires CONFIG_EDITOR_ENABLED=true');
   }
   if (config.ufw.maxBlockRules < 1 || config.ufw.maxBlockRules > 10000) {
     errors.push('UFW_BLOCK_MAX_RULES must be between 1 and 10000');

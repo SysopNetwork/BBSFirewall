@@ -603,6 +603,7 @@ function appPage(opts = {}) {
         </label>
       </div>
       <div class="help muted">Only needed when <code>SSH_MODE=terminate</code>. RSA is the safest choice for old BBS clients.</div>
+      <div class="help hidden" id="sshkey-master-note">Only a Global Admin account can replace the host key.</div>
       <div class="console hidden" id="sshkey-out"></div>
     </div>
 
@@ -637,13 +638,14 @@ function appPage(opts = {}) {
     <div class="card hidden" id="tools-ufw-card">
       <h3 style="margin-top:0">${toolsIcon('shield')}Host firewall (UFW)</h3>
       <div class="kv" id="ufw-kv"></div>
+      <div class="kv" id="ufw-auto-kv"></div>
       <div class="row" style="margin-top:10px">
         <button id="btn-ufw-preview">Preview changes</button>
         <button class="danger" id="btn-ufw-apply" disabled>Apply changes</button>
       </div>
       <div class="help muted">Preview is read-only. Apply requires typing "APPLY" to confirm, and
-        always re-checks the live state first — nothing here ever runs automatically. Enable it in
-        Settings &gt; Host Firewall (UFW). Global Admin only.</div>
+        always re-checks the live state first. With Auto-apply on, the same changes are made at startup
+        and after each Save. Enable it in Settings &gt; Host Firewall (UFW). Global Admin only.</div>
       <div id="ufw-diff-out" class="hidden" style="margin-top:12px"></div>
       <hr style="border-color:var(--border);margin:18px 0">
       <div style="font-weight:600;margin-bottom:6px">Kernel block push</div>
@@ -1238,6 +1240,21 @@ function renderUfwBlocks(d) {
 }
 
 let ufwBlocksPoll = null;
+// Auto-apply status (UFW_AUTO_APPLY), from the same poll as the block push.
+function renderUfwAuto(a) {
+  const kv = $("#ufw-auto-kv");
+  if (!kv) return;
+  if (!a || !a.enabled) { kv.innerHTML = kvLine("Auto-apply", "Off"); return; }
+  let rows = kvLine("Auto-apply", a.running || a.pending ? "On (applying changes…)" : "On");
+  const last = a.last;
+  if (!last) rows += kvLine("Last run", "not yet");
+  else {
+    rows += kvLine("Last run", fmtDate(last.at) + " (" + last.reason + ")");
+    rows += kvLine(last.ok ? "Result" : "Not applied", last.message);
+  }
+  kv.innerHTML = rows;
+}
+
 async function refreshUfwBlocks() {
   const kv = $("#ufw-blocks-kv");
   if (!kv) return;
@@ -1248,8 +1265,11 @@ async function refreshUfwBlocks() {
     const d = await res.json();
     if (!res.ok || d.error) { $("#ufw-blocks-out").innerHTML = "<div class='notice err'>" + esc(d.error || ("HTTP " + res.status)) + "</div>"; return; }
     renderUfwBlocks(d);
-    // A first sync of a big blocklist can take a while - keep the progress live.
-    if (d.running) ufwBlocksPoll = setTimeout(refreshUfwBlocks, 2000);
+    renderUfwAuto(d.autoApply);
+    // A first sync of a big blocklist can take a while, and an auto-apply run
+    // starts a few seconds after a Save - keep polling until both are done.
+    const auto = d.autoApply || {};
+    if (d.running || auto.running || auto.pending) ufwBlocksPoll = setTimeout(refreshUfwBlocks, 2000);
   } catch (e) {
     $("#ufw-blocks-out").innerHTML = "<div class='notice err'>Request failed: " + esc(e.message) + "</div>";
   }
@@ -1464,8 +1484,11 @@ async function loadUpdateInfo() {
   try {
     const res = await fetch("api/update/check", { headers: { "X-CSRF-Token": CSRF } });
     if (res.status === 401) { location.href = "login"; return; }
-    if (!res.ok) return;
-    DATA.update = await res.json();
+    // A failed GitHub check (502) still carries the local backups list, so
+    // rollback stays available when GitHub is unreachable.
+    const d = await res.json().catch(() => null);
+    if (!d) return;
+    DATA.update = d;
     renderUpdate();
   } catch (e) { /* Tools tab just keeps showing its last-known state */ }
 }
@@ -1506,7 +1529,15 @@ function renderUpdate() {
     note.textContent = "";
   }
 
-  const canApply = !!(u.updateAvailable && !u.error && u.platformSupported && u.tarAvailable);
+  // Installing a release or restoring a backup is Global Admin only (the
+  // server refuses it too).
+  const master = isMasterAdmin();
+  if (!master) {
+    note.textContent = (note.textContent ? note.textContent + " " : "") +
+      "Only a Global Admin account can install updates or roll back.";
+  }
+
+  const canApply = !!(master && u.updateAvailable && !u.error && u.platformSupported && u.tarAvailable);
   applyBtn.classList.toggle("hidden", !canApply);
   applyBtn.textContent = "Update to v" + (u.latestVersion || "?");
 
@@ -1517,15 +1548,21 @@ function renderUpdate() {
     notesOut.classList.add("hidden");
   }
 
+  // Always shown to a Global Admin, so rollback is discoverable before the
+  // first update has made a backup.
   const backups = u.backups || [];
+  backupsWrap.classList.toggle("hidden", !master);
   if (backups.length) {
-    backupsWrap.classList.remove("hidden");
     backupsList.innerHTML = backups.map((name) =>
       "<div class='row' style='justify-content:space-between'><span class='muted'>" + esc(name) + "</span>" +
       "<button class='small' data-rollback='" + esc(name) + "'>Roll back to this</button></div>"
     ).join("");
   } else {
-    backupsWrap.classList.add("hidden");
+    // A <p>, not a <div>: .kv lays out each <div> as a flex label/value row
+    // and pads <b> into a label column, which splits a sentence apart.
+    backupsList.innerHTML = "<p class='help muted' style='margin:0'>No backups yet. <b>Update now</b> saves a " +
+      "backup of the running version first, and it will be listed here with a <b>Roll back to this</b> " +
+      "button. Code copied onto the server by hand is not backed up here.</p>";
   }
 }
 
@@ -1759,8 +1796,9 @@ function groupLogFiles(files) {
 function logRow(f) {
   return '<tr><td title="' + esc(f.file) + '">' + esc(f.file) + "</td><td>" + esc(fmtBytes(f.size)) + "</td><td>" + esc(fmtDate(f.mtime)) + '</td><td class="c-act">' +
     '<button class="small" data-log-view data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">View</button> ' +
-    '<button class="small" data-log-dl data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">Download</button> ' +
-    '<button class="small danger" data-log-del data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">Delete</button>' +
+    '<button class="small" data-log-dl data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">Download</button>' +
+    // Deleting logs is Global Admin only (the server refuses it too).
+    (isMasterAdmin() ? ' <button class="small danger" data-log-del data-proxy="' + esc(f.proxy) + '" data-file="' + esc(f.file) + '">Delete</button>' : "") +
     "</td></tr>";
 }
 
@@ -2304,6 +2342,8 @@ async function load(attempt) {
   updateAddIpButtons();
   $("#tools-reboot-card").classList.toggle("hidden", st.role !== "master_admin");
   $("#tools-ufw-card").classList.toggle("hidden", st.role !== "master_admin");
+  $("#btn-sshkey").disabled = st.role !== "master_admin";
+  $("#sshkey-master-note").classList.toggle("hidden", st.role === "master_admin");
   renderUfwKv();
   renderUpdate();
   loadHealth(); // don't await — Tools-tab data can arrive after the rest of the page
@@ -2377,8 +2417,11 @@ $("#btn-save").addEventListener("click", async () => {
   const r = await api("api/save", collect());
   $("#btn-save").disabled = false;
   if (r.ok && r.data && r.data.ok) {
-    notice("ok", "Saved." + (r.data.backup ? " Backup: " + r.data.backup + "." : "") +
-      " Restart the firewall to apply .env changes.");
+    // Lists apply as soon as they are saved; only settings (.env) need a restart.
+    notice("ok", r.data.envChanged === false
+      ? "Saved. List changes are already in effect - no restart needed."
+      : "Saved." + (r.data.backup ? " Backup: " + r.data.backup + "." : "") +
+        " Restart the firewall to apply the settings changes.");
     await load();
   } else {
     const d = r.data || {};

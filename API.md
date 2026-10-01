@@ -274,9 +274,13 @@ changes need a restart.
 Success:
 
 ```json
-{ "ok": true, "backup": "ENVBACKUPS/.env.bak.2026-09-09T23-34-26-973Z",
+{ "ok": true, "backup": "ENVBACKUPS/.env.bak.2026-09-09T23-34-26-973Z", "envChanged": true,
   "files": { "blocklist": "saved" }, "trustedHostCount": 4 }
 ```
+
+`envChanged` is `false` when the save only changed list files: `.env` is then left
+untouched, no backup is made (`backup` is `null`), and no restart is needed —
+list files take effect immediately.
 
 ### `POST /api/restart`
 

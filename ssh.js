@@ -1,9 +1,8 @@
 /**
  * BBSFirewall - SSH server (terminate mode)
  * Accepts any credentials and proxies the session to the backend telnet server.
- * Note: Binary file transfers (Zmodem, etc.) are unreliable over SSH due to PTY
- * processing — use SSH_MODE=passthrough with a backend that has its own SSH
- * server if you need reliable transfers.
+ * Acts as the telnet client toward the BBS (telnet-filter.js), so binary
+ * transfers such as Zmodem pass through intact.
  * https://github.com/SysopNetwork/BBSFirewall
  */
 
@@ -50,10 +49,31 @@ function shouldBlockByCountry(config, ipAddress) {
   return false;
 }
 
+// How long a caller has to finish the SSH handshake and log in (OpenSSH's
+// LoginGraceTime default). Applies even with CONNECTION_TIMEOUT=0, which only
+// governs idle BBS sessions.
+const LOGIN_GRACE_MS = 120000;
+// SSH "env" requests accepted per session; a normal client sends a handful.
+const MAX_ENV_VARS = 64;
+
+// Drop a caller outright (blocked, timed out, or tripped a trigger).
+function dropSocket(socket) {
+  socket.on('error', () => {});
+  socket.destroy();
+}
+
 // `tracker` is the BBSFirewall instance (server.js): SSH connections count
 // against the same activeConnections / MAX_CONNECTIONS as telnet and SSH
 // passthrough, which go through its handleNewConnection(). Terminate mode used
 // to bypass that entirely - no global cap, no idle timeout.
+//
+// Every check runs when the TCP connection is accepted, before ssh2 sees the
+// socket. ssh2's own connection callback only fires once the caller has sent
+// its SSH banner, so checks placed there never ran for a caller that connects
+// and stays silent: blocked IPs, rate limits, the per-IP and global caps and
+// the idle timeout were all skipped, and such sockets stayed open forever.
+// The returned net.Server owns the port; accepted sockets are handed to ssh2
+// with injectSocket().
 function createSSHServer(config, tracker) {
   if (config.sshMode !== 'terminate') {
     return null;
@@ -68,90 +88,34 @@ function createSSHServer(config, tracker) {
     process.exit(1);
   }
 
-  const server = new ssh2.Server(
+  // Per-socket state set at accept time, read back in the ssh2 callback.
+  const accepted = new WeakMap();
+
+  const sshd = new ssh2.Server(
     {
       hostKeys: [hostKey],
+      // Banner "SSH-2.0-BBSFirewall" instead of the default, which names the
+      // SSH library and its exact version.
+      ident: 'BBSFirewall',
       algorithms: {
         cipher: config.sshCiphers,
       },
     },
     (client) => {
-      const clientIP   = client._sock?.remoteAddress;
-      const clientPort = client._sock?.remotePort || 0;
+      const socket = client._sock;
+      const conn = socket && accepted.get(socket);
 
       client.on('error', (err) => {
         log.debug(`SSH client error: ${err.message}`);
       });
 
-      if (!clientIP) {
-        log.blocked('SSH connection rejected: unable to determine client IP');
+      if (!conn) {
+        // Only sockets from the accept handler below are ever injected.
         client.end();
         return;
       }
 
-      log.connection(`SSH client connected from ${clientIP}`);
-
-      if (tracker && tracker.activeConnections >= config.maxConnections) {
-        log.blocked(`SSH connection rejected: max connections (${config.maxConnections}) reached`);
-        metrics.incRejected();
-        client.end();
-        return;
-      }
-
-      const ipFilter = getIPFilter();
-      let sshConnectionTracked = false;
-      let sshWhitelisted = false;
-
-      if (ipFilter) {
-        const accessCheck = ipFilter.shouldAllowConnection(clientIP);
-        if (!accessCheck.allowed) {
-          log.blocked(`SSH connection blocked from ${clientIP}: ${accessCheck.reason}`);
-          client.end();
-          return;
-        }
-        sshWhitelisted = accessCheck.whitelisted || false;
-
-        // Check per-IP concurrent connection limit (whitelisted IPs are exempt)
-        if (!accessCheck.whitelisted && ipFilter.isConnectionLimitExceeded(clientIP)) {
-          log.blocked(`SSH connection rejected: per-IP limit reached for ${clientIP}`);
-          client.end();
-          return;
-        }
-
-        // Check country blocking (whitelisted IPs are exempt)
-        if (!accessCheck.whitelisted && shouldBlockByCountry(config, clientIP)) {
-          log.blocked(`SSH connection blocked by country filter: ${clientIP}`);
-          client.end();
-          return;
-        }
-
-        // Register this connection in the per-IP tracker
-        ipFilter.trackConnectionOpen(clientIP);
-        sshConnectionTracked = true;
-      }
-
-      // All checks passed - take a global connection slot, released on close.
-      let globalSlotTaken = false;
-      if (tracker) {
-        tracker.activeConnections++;
-        metrics.incActive('ssh');
-        globalSlotTaken = true;
-      }
-
-      // Same idle timeout the telnet side applies (server.js handleNewConnection).
-      // Not socket.setTimeout(): ssh2 pings the client every 15s on its own
-      // (keepalive@openssh.com) and each ping write resets a socket timer, so it
-      // never fires. Only session data in either direction counts as activity -
-      // noteActivity() is called from the shell stream/backend data handlers.
-      let idleTimer = null;
-      const noteActivity = () => { if (idleTimer) idleTimer.refresh(); };
-      if (config.connectionTimeout > 0 && client._sock) {
-        idleTimer = setTimeout(() => {
-          log.info(`SSH connection timeout for ${clientIP}`);
-          client._sock.destroy();
-        }, config.connectionTimeout);
-        client.on('close', () => clearTimeout(idleTimer));
-      }
+      const { clientIP, clientPort, whitelisted: sshWhitelisted, noteActivity } = conn;
 
       // One BBS shell at a time per SSH connection. Each shell opens its own
       // backend connection, so unlimited shell channels on one connection let a
@@ -170,6 +134,7 @@ function createSSHServer(config, tracker) {
       });
 
       client.on('ready', () => {
+        conn.loggedIn();
         log.info(`SSH client ${clientIP} authenticated`);
 
         client.on('session', (accept, reject) => {
@@ -185,8 +150,13 @@ function createSSHServer(config, tracker) {
           let detectedEncoding = 'cp437';
           let sshEnv = {};
           let termType = null;
+          let envCount = 0;
 
           session.on('env', (accept, reject, info) => {
+            if (++envCount > MAX_ENV_VARS) {
+              if (typeof reject === 'function') reject();
+              return;
+            }
             log.debug(`SSH env from ${clientIP}: ${info.key}=${info.value}`);
             sshEnv[info.key] = info.value;
 
@@ -318,8 +288,11 @@ function createSSHServer(config, tracker) {
                   log.blocked(`Auto-block ${clientIP}: shell input matched trigger ${JSON.stringify(hit)}`);
                   ipf.autoBlockIP(clientIP, hit);
                   metrics.incTriggerBlock();
-                  stream.end();
+                  // Drop the whole SSH connection, not just this shell: the
+                  // blocklist is only checked at connect, so a still-open
+                  // connection could open a fresh shell straight to the BBS.
                   if (!backendSocket.destroyed) backendSocket.destroy();
+                  dropSocket(socket);
                   return;
                 }
                 if (!triggerScanner || triggerScanner.full) { triggerScan = false; triggerScanner = null; }
@@ -398,7 +371,7 @@ function createSSHServer(config, tracker) {
                 log.blocked(`Auto-block ${clientIP}: exec command matched trigger ${JSON.stringify(hit)}`);
                 if (ipf) ipf.autoBlockIP(clientIP, hit);
                 metrics.incTriggerBlock();
-                client.end();
+                dropSocket(socket);
                 return;
               }
             }
@@ -409,18 +382,108 @@ function createSSHServer(config, tracker) {
 
       client.on('close', () => {
         log.connection(`SSH client ${clientIP} disconnected`);
-        if (globalSlotTaken) {
-          globalSlotTaken = false;
-          tracker.activeConnections--;
-          metrics.decActive('ssh');
-        }
-        if (sshConnectionTracked) {
-          const ipFilter = getIPFilter();
-          if (ipFilter) ipFilter.trackConnectionClose(clientIP);
-        }
       });
     }
   );
+
+  const server = net.createServer((socket) => {
+    const clientIP   = socket.remoteAddress;
+    const clientPort = socket.remotePort || 0;
+
+    if (!clientIP) {
+      log.blocked('SSH connection rejected: unable to determine client IP');
+      dropSocket(socket);
+      return;
+    }
+
+    if (tracker && tracker.activeConnections >= config.maxConnections) {
+      log.blocked(`SSH connection rejected: max connections (${config.maxConnections}) reached`);
+      metrics.incRejected();
+      dropSocket(socket);
+      return;
+    }
+
+    const ipFilter = getIPFilter();
+    let whitelisted = false;
+    let ipTracked = false;
+
+    if (ipFilter) {
+      const accessCheck = ipFilter.shouldAllowConnection(clientIP);
+      if (!accessCheck.allowed) {
+        log.blocked(`SSH connection blocked from ${clientIP}: ${accessCheck.reason}`);
+        dropSocket(socket);
+        return;
+      }
+      whitelisted = accessCheck.whitelisted || false;
+
+      // Check per-IP concurrent connection limit (whitelisted IPs are exempt)
+      if (!whitelisted && ipFilter.isConnectionLimitExceeded(clientIP)) {
+        log.blocked(`SSH connection rejected: per-IP limit reached for ${clientIP}`);
+        dropSocket(socket);
+        return;
+      }
+
+      // Check country blocking (whitelisted IPs are exempt)
+      if (!whitelisted && shouldBlockByCountry(config, clientIP)) {
+        log.blocked(`SSH connection blocked by country filter: ${clientIP}`);
+        dropSocket(socket);
+        return;
+      }
+
+      // Register this connection in the per-IP tracker
+      ipFilter.trackConnectionOpen(clientIP);
+      ipTracked = true;
+    }
+
+    log.connection(`SSH client connected from ${clientIP}`);
+
+    // All checks passed - take a global connection slot.
+    if (tracker) {
+      tracker.activeConnections++;
+      metrics.incActive('ssh');
+    }
+
+    // Must finish the handshake and log in within LOGIN_GRACE_MS.
+    let loginTimer = setTimeout(() => {
+      log.info(`SSH login timeout for ${clientIP}`);
+      socket.destroy();
+    }, LOGIN_GRACE_MS);
+
+    // Same idle timeout the telnet side applies (server.js handleNewConnection).
+    // Not socket.setTimeout(): ssh2 pings the client every 15s on its own
+    // (keepalive@openssh.com) and each ping write resets a socket timer, so it
+    // never fires. Only session data in either direction counts as activity -
+    // noteActivity() is called from the shell stream/backend data handlers.
+    let idleTimer = null;
+    if (config.connectionTimeout > 0) {
+      idleTimer = setTimeout(() => {
+        log.info(`SSH connection timeout for ${clientIP}`);
+        socket.destroy();
+      }, config.connectionTimeout);
+    }
+
+    socket.once('close', () => {
+      clearTimeout(loginTimer);
+      clearTimeout(idleTimer);
+      if (tracker) {
+        tracker.activeConnections--;
+        metrics.decActive('ssh');
+      }
+      if (ipTracked) {
+        const ipf = getIPFilter();
+        if (ipf) ipf.trackConnectionClose(clientIP);
+      }
+    });
+
+    accepted.set(socket, {
+      clientIP,
+      clientPort,
+      whitelisted,
+      noteActivity: () => { if (idleTimer) idleTimer.refresh(); },
+      loggedIn: () => { clearTimeout(loginTimer); loginTimer = null; },
+    });
+    sshd.injectSocket(socket);
+  });
 
   return server;
 }

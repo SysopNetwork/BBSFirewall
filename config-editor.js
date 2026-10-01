@@ -267,17 +267,16 @@ const ENV_SCHEMA = [
         help: 'passthrough mode only. Prepend a PROXY v1 header for the backend sshd. Only enable if that sshd understands it — a plain SSH server drops the handshake otherwise.' },
     ]},
   { name: 'Host Firewall (UFW)', icon: 'shield',
-    help: 'Optional — reconciles a tagged subset of this host’s own ufw rules against the settings above (telnet/SSH/web-redirect ports open to anyone, the config editor and admin SSH port scoped to Trusted Hosts). Requires ufw installed. Off by default. This never enables or disables ufw itself — turn ufw on yourself first; BBSFirewall only ever manages individual rules within an already-active ufw. Phase 1: preview/dry-run only from the Tools tab, nothing applies automatically yet.',
+    help: 'Optional — reconciles a tagged subset of this host’s own ufw rules against the settings above (telnet/SSH/web-redirect ports open to anyone, the config editor and admin SSH port scoped to Trusted Hosts). Requires ufw installed. Off by default. This never enables or disables ufw itself — turn ufw on yourself first; BBSFirewall only ever manages individual rules within an already-active ufw. Changes are made from the Tools tab (Preview, then Apply), or automatically with Auto-apply below.',
     fields: [
       { key: 'UFW_ENABLED', type: 'bool', label: 'Enable UFW rule management', def: 'false',
         help: 'Needs Admin SSH port set below, and ufw already installed and enabled on this host.' },
       { key: 'HOST_ADMIN_SSH_PORT', type: 'port', label: 'Admin SSH port (this host)', def: '',
         help: 'The port YOU manage this server with — not necessarily SSH_LISTEN_PORT above, which is the BBS’s own SSH front door. Required to enable UFW management; never inferred.',
         helpLong: 'This is deliberately a separate, explicit field rather than something BBSFirewall guesses. In SSH passthrough mode, port 22 is likely the BBS’s own sshd, not this host’s management SSH — conflating the two could compute a rule set that leaves your actual admin access without an allow rule. Scoped to the same Trusted Hosts list as the config editor.' },
-      { key: 'UFW_LIMIT_ADMIN_SSH', type: 'bool', label: 'Rate-limit the admin SSH port', def: 'false',
-        help: 'Adds ufw’s own kernel-level connection-rate limiting (denies an IP after 6 connection attempts in 30 seconds) on top of whatever this host’s sshd already does.' },
       { key: 'UFW_AUTO_APPLY', type: 'bool', label: 'Auto-apply on save/startup', def: 'false',
-        help: 'Phase 2 — not yet available. When built, reconciles automatically instead of requiring a manual Preview + Apply from the Tools tab each time.' },
+        help: 'Applies rule changes automatically at startup and after each Save, instead of a manual Preview + Apply. Needs UFW rule management on.',
+        helpLong: 'Uses the same checks as Apply: never leaves the admin SSH port without an allow rule, and never removes the only rule for a port sshd is listening on. It is stricter than a manual Apply: if it cannot tell which ports sshd uses, or the change would remove more than half of the rules, it changes nothing and the Tools tab asks you to Preview and Apply yourself. Settings changed in .env take effect at the next restart, so that is when their rules are applied; Trusted Hosts changes apply right after Save. The result of the last run is shown in the Tools tab.' },
       { key: 'UFW_PUSH_BLOCKS', type: 'bool', label: 'Push blocks to ufw (kernel-level)', def: 'false',
         help: 'Mirrors Blocklist entries and trigger auto-blocks into ufw as "deny from" rules, so blocked callers are dropped by the kernel even while BBSFirewall restarts. Runs automatically. Needs UFW rule management on and a non-empty Trusted Hosts list.',
         helpLong: 'Each rule denies the address on EVERY port, so entries that overlap Trusted Hosts, the Status or API allowlists, the Whitelist, or loopback are never pushed (the Tools tab lists any it skipped). Rate-limit blocks are not pushed — they are short and hit ordinary callers who reconnect too fast. Temporary trigger blocks are removed from ufw when they expire. Turning this off stops syncing but leaves already-pushed rules in place; remove them from the Tools tab.' },
@@ -1323,63 +1322,69 @@ async function doSave(req, res, session) {
     return sendJson(res, 400, { error: err.message });
   }
 
-  // Back up (into ENVBACKUPS/), then write.
+  // Back up (into ENVBACKUPS/), then write - only when .env actually changes.
+  // A Save that only edits a list file used to rewrite .env anyway and make an
+  // identical backup each time, and since only the newest backups are kept,
+  // routine list edits pushed out the ones worth having.
+  const envChanged = newText !== originalText;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backupDir = path.join(dir, ENV_BACKUP_DIRNAME);
   const backupPath = path.join(backupDir, `${base}.bak.${stamp}`);
   let backupMade = false;
-  try {
-    if (originalText !== '') {
-      fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
-      migrateLegacyBackups(dir, backupDir, base);
-      fs.copyFileSync(envPath, backupPath);
-      chmodQuiet(backupPath, SECRET_FILE_MODE);
-      backupMade = true;
+  if (envChanged) {
+    try {
+      if (originalText !== '') {
+        fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+        migrateLegacyBackups(dir, backupDir, base);
+        fs.copyFileSync(envPath, backupPath);
+        chmodQuiet(backupPath, SECRET_FILE_MODE);
+        backupMade = true;
+      }
+      fs.writeFileSync(envPath, newText, { mode: SECRET_FILE_MODE });
+      chmodQuiet(envPath, SECRET_FILE_MODE); // mode: only applies on create; enforce on overwrite too
+    } catch (err) {
+      return sendJson(res, 500, { error: 'Write failed: ' + err.message });
     }
-    fs.writeFileSync(envPath, newText, { mode: SECRET_FILE_MODE });
-    chmodQuiet(envPath, SECRET_FILE_MODE); // mode: only applies on create; enforce on overwrite too
-  } catch (err) {
-    return sendJson(res, 500, { error: 'Write failed: ' + err.message });
-  }
 
-  // Authoritative validation: a fresh process loading the new file. The child
-  // must see the file's values, not this process's — dotenv does not override
-  // an env var that is already set, and every key that was in .env at startup
-  // is still in our process.env. Strip every key either .env mentions so the
-  // child's dotenv repopulates them from the new file (a key the user removed
-  // then reads as unset, which is what we want to validate).
-  const staleKeys = new Set(SCHEMA_KEYS);
-  for (const src of [originalText, newText]) {
-    for (const line of src.split(/\r?\n/)) {
-      const m = line.match(ENV_LINE_RE);
-      if (m) staleKeys.add(m[3]);
+    // Authoritative validation: a fresh process loading the new file. The child
+    // must see the file's values, not this process's — dotenv does not override
+    // an env var that is already set, and every key that was in .env at startup
+    // is still in our process.env. Strip every key either .env mentions so the
+    // child's dotenv repopulates them from the new file (a key the user removed
+    // then reads as unset, which is what we want to validate).
+    const staleKeys = new Set(SCHEMA_KEYS);
+    for (const src of [originalText, newText]) {
+      for (const line of src.split(/\r?\n/)) {
+        const m = line.match(ENV_LINE_RE);
+        if (m) staleKeys.add(m[3]);
+      }
     }
-  }
-  const childEnv = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (!staleKeys.has(k)) childEnv[k] = v;
-  }
-  childEnv.DOTENV_CONFIG_QUIET = 'true';
+    const childEnv = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (!staleKeys.has(k)) childEnv[k] = v;
+    }
+    childEnv.DOTENV_CONFIG_QUIET = 'true';
 
-  try {
-    execFileSync(process.execPath, ['-e', 'require("./config").validateConfig()'], {
-      cwd: __dirname,
-      stdio: 'pipe',
-      timeout: 8000,
-      env: childEnv,
-    });
-  } catch (err) {
-    if (backupMade) {
-      try { fs.copyFileSync(backupPath, envPath); } catch (_) {}
-    } else {
-      try { fs.unlinkSync(envPath); } catch (_) {}
+    try {
+      execFileSync(process.execPath, ['-e', 'require("./config").validateConfig()'], {
+        cwd: __dirname,
+        stdio: 'pipe',
+        timeout: 8000,
+        env: childEnv,
+      });
+    } catch (err) {
+      if (backupMade) {
+        try { fs.copyFileSync(backupPath, envPath); } catch (_) {}
+      } else {
+        try { fs.unlinkSync(envPath); } catch (_) {}
+      }
+      pruneBackups(backupDir, base);
+      const detail = extractValidationErrors(err);
+      return sendJson(res, 400, { error: 'Configuration rejected, .env restored:\n' + detail });
     }
+
     pruneBackups(backupDir, base);
-    const detail = extractValidationErrors(err);
-    return sendJson(res, 400, { error: 'Configuration rejected, .env restored:\n' + detail });
   }
-
-  pruneBackups(backupDir, base);
 
   // A list whose path just changed: if nothing is at the new path yet, start
   // it with the current list, so the restart doesn't come up with an empty
@@ -1442,12 +1447,18 @@ async function doSave(req, res, session) {
   // Trusted Hosts protects addresses from the kernel block push, so a change
   // there must reconcile too (the list reloads above only cover ipfilter's).
   ufwBlocks.requestSync();
+  // Trusted Hosts (and the API/Status lists) decide who the editor and admin
+  // SSH port rules admit. .env changes only take effect after a restart, and
+  // the startup run picks those up.
+  requestUfwAutoApply('settings saved');
 
-  log.info(`Config saved by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  log.warn(`Config saved by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
 
   return sendJson(res, 200, {
     ok: true,
     backup: backupMade ? `${ENV_BACKUP_DIRNAME}/${path.basename(backupPath)}` : null,
+    // .env changes need a restart; list files are reloaded live above.
+    envChanged,
     files: fileResults,
     trustedHostCount: loadedTrustedHosts.entries.length,
   });
@@ -1708,7 +1719,7 @@ async function handleGeoip(req, res, session) {
   const args = ['download-geoip.js'];
   if (action === 'update') args.push('--force');
 
-  log.info(`GeoIP ${action} requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  log.warn(`GeoIP ${action} requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   runAction(process.execPath, args, { timeout: ACTION_TIMEOUT_MS }, async (r) => {
     release('geoip');
     if (r.ok) {
@@ -1733,6 +1744,7 @@ async function handleGeoip(req, res, session) {
 // /api/sshkey  { overwrite?: bool, type?: 'rsa' | 'ed25519' }
 // ---------------------------------------------------------------------------
 async function handleSshKey(req, res, session) {
+  if (!requireGlobalAdmin(res, session)) return;
   if (!acquire(res, 'sshkey')) return;
   let overwrite = false;
   let type = 'rsa';
@@ -1781,7 +1793,7 @@ async function handleSshKey(req, res, session) {
     ? ['-t', 'ed25519', '-N', '', '-C', 'bbsfirewall-host-key', '-f', keyPath]
     : ['-t', 'rsa', '-b', '3072', '-m', 'PEM', '-N', '', '-C', 'bbsfirewall-host-key', '-f', keyPath];
 
-  log.info(`SSH host key (${type}) generation requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  log.warn(`SSH host key (${type}) generation requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   runAction('ssh-keygen', args, { timeout: 30000 }, async (r) => {
     release('sshkey');
     if (r.ok) {
@@ -1910,7 +1922,6 @@ async function computeUfwState() {
     apiHosts: loadedApiHosts ? loadedApiHosts.entries : [],
     apiEnabled: !!config.api.enabled,
     adminSshPort: adminPort,
-    limitAdminSsh: config.ufw.limitAdminSsh,
     ipv6Supported,
   });
   const diff = ufw.diffRules(current.rules, desired);
@@ -2027,6 +2038,99 @@ async function handleUfwApply(req, res, session) {
 }
 
 // ---------------------------------------------------------------------------
+// UFW auto-apply (UFW_AUTO_APPLY). Runs the same computeUfwState() and safety
+// rails as /api/ufw/apply above, at startup and after every Save, so the
+// tagged rules follow Trusted Hosts and the listener ports without a manual
+// Preview + Apply. Stricter than the manual path, because nobody looks at the
+// diff before it runs:
+//   - the ports sshd listens on must be known (manual Apply goes ahead without);
+//   - a diff removing more than half of the tagged rules (and more than 3) is
+//     left for a person to Apply;
+//   - it never runs alongside a manual Apply: it takes the same 'ufw' lock,
+//     and waits and retries if the lock is held.
+// A skipped run changes nothing; it is logged and shown in the Tools tab.
+// ---------------------------------------------------------------------------
+const UFW_AUTO_DEBOUNCE_MS = 3000;
+const UFW_AUTO_RETRY_MS = 5000;
+const UFW_AUTO_STARTUP_DELAY_MS = 10000;
+let ufwAutoTimer = null;
+let ufwAutoRunning = false;
+let ufwAutoLast = null; // { at, reason, ok, applied, added, removed, message }
+
+function ufwAutoApplyOn() {
+  return !!(config.ufw.enabled && config.ufw.autoApply);
+}
+
+function requestUfwAutoApply(reason, delayMs = UFW_AUTO_DEBOUNCE_MS) {
+  if (!ufwAutoApplyOn()) return;
+  if (ufwAutoTimer) clearTimeout(ufwAutoTimer);
+  ufwAutoTimer = setTimeout(() => {
+    ufwAutoTimer = null;
+    runUfwAutoApply(reason).catch((err) => log.error(`UFW auto-apply failed: ${err.message}`));
+  }, delayMs);
+  if (ufwAutoTimer.unref) ufwAutoTimer.unref();
+}
+
+function ufwAutoRemovalTooLarge(diff, currentCount) {
+  return diff.toRemove.length > Math.max(3, Math.floor(currentCount / 2));
+}
+
+async function runUfwAutoApply(reason) {
+  if (!ufwAutoApplyOn()) return;
+  if (ufwAutoRunning || busy.has('ufw')) {
+    requestUfwAutoApply(reason, UFW_AUTO_RETRY_MS);
+    return;
+  }
+  ufwAutoRunning = true;
+  busy.add('ufw');
+  const record = (r) => { ufwAutoLast = { at: new Date().toISOString(), reason, added: 0, removed: 0, ...r }; };
+  const skip = (message) => {
+    log.warn(`UFW auto-apply skipped (${reason}): ${message}`);
+    record({ ok: false, applied: false, message });
+  };
+  try {
+    const state = await computeUfwState();
+    if (!state.ok) return skip(state.body.error || 'ufw is not ready.');
+    const b = state.body;
+    if (b.inSync) return record({ ok: true, applied: false, message: 'Already in sync.' });
+    if (!b.adminRuleOk) {
+      return skip(`The rules would leave the admin SSH port (${b.adminSshPort}) without an allow rule. ` +
+        'Check that Trusted Hosts is not empty.');
+    }
+    if (b.sshdLockout.length) {
+      const ports = [...new Set(b.sshdLockout.map((r) => r.to))].join(', ');
+      return skip(`This would remove the only rule for ${ports}, where sshd is listening. ` +
+        'Move sshd first, or use Preview and Apply.');
+    }
+    if (b.sshdPorts === null) {
+      return skip('Could not tell which ports sshd listens on, so nothing was changed automatically. ' +
+        'Use Preview and Apply.');
+    }
+    if (ufwAutoRemovalTooLarge(b.diff, b.current.length)) {
+      return skip(`This would remove ${b.diff.toRemove.length} of ${b.current.length} rules, which is too ` +
+        'large a change to make automatically. Use Preview and Apply.');
+    }
+
+    const diff = b.diff;
+    log.warn(`UFW auto-apply (${reason}): ${diff.toAdd.length} to add, ${diff.toRemove.length} to remove: ` +
+      JSON.stringify(diff));
+    const result = await ufw.applyDiff(diff, { dryRun: false });
+    log.warn(`UFW auto-apply completed (${reason}): ${JSON.stringify(result.changes)}`);
+    record({
+      ok: true, applied: true, added: diff.toAdd.length, removed: diff.toRemove.length,
+      message: `Added ${diff.toAdd.length}, removed ${diff.toRemove.length}.`,
+    });
+  } catch (err) {
+    log.error(`UFW auto-apply failed (${reason}): ${err.message}`);
+    record({ ok: false, applied: false, message: `Failed partway through: ${err.message}. ` +
+      'Use Preview to check the current state.' });
+  } finally {
+    ufwAutoRunning = false;
+    busy.delete('ufw');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // /api/ufw/log — Global Admin only, read-only. A connection
 // ufw blocks at the kernel level never reaches BBSFirewall, so without this
 // it is invisible in the app's own logs. Tails /var/log/ufw.log (standard
@@ -2052,7 +2156,12 @@ async function handleUfwLog(req, res, session) {
 // ---------------------------------------------------------------------------
 async function handleUfwBlocksStatus(req, res, session) {
   if (!requireMasterAdmin(res, session)) return;
-  return sendJson(res, 200, await ufwBlocks.getStatus());
+  return sendJson(res, 200, {
+    ...await ufwBlocks.getStatus(),
+    // pending: a run is queued (a Save just happened); the page keeps polling
+    // until it has run, so the result shows without a manual refresh.
+    autoApply: { enabled: ufwAutoApplyOn(), running: ufwAutoRunning, pending: !!ufwAutoTimer, last: ufwAutoLast },
+  });
 }
 
 async function handleUfwBlocksSync(req, res, session) {
@@ -2060,7 +2169,7 @@ async function handleUfwBlocksSync(req, res, session) {
   if (!config.ufw.enabled || !config.ufw.pushBlocks) {
     return sendJson(res, 400, { error: 'Block push is off — enable "Push blocks to ufw" in Settings first.' });
   }
-  log.info(`UFW block sync requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  log.warn(`UFW block sync requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
   // Not awaited: a first push of a large blocklist can outlast the HTTP
   // request timeout. The UI polls GET /api/ufw/blocks for progress instead.
   ufwBlocks.syncNow().catch((err) => log.error(`UFW block sync failed: ${err.message}`));
@@ -2134,6 +2243,7 @@ function restartAfterUpdate(req, keepSession) {
 }
 
 async function handleUpdateApply(req, res, session) {
+  if (!requireGlobalAdmin(res, session)) return;
   if (!acquire(res, 'update')) return;
   let tag;
   let keepSession = true;
@@ -2174,6 +2284,7 @@ async function handleUpdateApply(req, res, session) {
 }
 
 async function handleUpdateRollback(req, res, session) {
+  if (!requireGlobalAdmin(res, session)) return;
   if (!acquire(res, 'update')) return;
   let backup;
   let keepSession = true;
@@ -2516,6 +2627,7 @@ async function handleLogsDownloadAll(req, res) {
 }
 
 async function handleLogsDelete(req, res, session) {
+  if (!requireGlobalAdmin(res, session)) return;
   if (!acquire(res, 'logs')) return;
   try {
     let payload;
@@ -2596,7 +2708,9 @@ async function handleLoginPost(req, res, ip) {
     'Cache-Control': 'no-store',
   });
   res.end();
-  log.info(`Config editor login: "${sanitizeForLog(username)}" from ${ip}`);
+  // connection, not info: the file log records it at the default level, so
+  // every admin login is on record. Admin changes log at warn for the same reason.
+  log.connection(`Config editor login: "${sanitizeForLog(username)}" from ${ip}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2649,7 +2763,7 @@ async function handleMfaVerifyLogin(req, res, session, ip) {
 
   mfaFails.delete(ip);
   markSessionMfaVerified(session);
-  log.info(`MFA verified for "${sanitizeForLog(session.username)}" from ${ip}`);
+  log.connection(`MFA verified for "${sanitizeForLog(session.username)}" from ${ip}`);
   return sendJson(res, 200, { ok: true });
 }
 
@@ -2879,8 +2993,19 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
 // ---------------------------------------------------------------------------
 function requireMasterAdmin(res, session) {
   if (session.role === 'master_admin') return true;
-  sendJson(res, 403, { error: 'Only a Global Admin account can manage admin accounts.' });
+  sendJson(res, 403, { error: 'Only a Global Admin account can do this.' });
   return false;
+}
+
+// For handlers that are ALSO on the Management API lane: the API key is set
+// only by a Global Admin, so a key-authenticated caller is allowed through.
+// Used for actions a Firewall Admin must not reach - installing a release
+// (an older one lacks the current role rules, so a downgrade was a way
+// around them), restoring a backup, deleting log files (the audit trail of
+// their own actions), and replacing the SSH host key.
+function requireGlobalAdmin(res, session) {
+  if (session.isApi) return true;
+  return requireMasterAdmin(res, session);
 }
 
 function accountSummary(a) {
@@ -3043,7 +3168,7 @@ async function handleWhitelistMe(req, res, session) {
   } catch (_) { /* ipfilter not ready — restart will pick it up */ }
 
   release('save');
-  log.info(`"${sanitizeForLog(session.username)}" whitelisted their own IP ${ip} from Security Settings`);
+  log.warn(`"${sanitizeForLog(session.username)}" whitelisted their own IP ${ip} from Security Settings`);
   return sendJson(res, 200, { ok: true, ip, added });
 }
 
@@ -3630,6 +3755,10 @@ function startConfigEditorServer(firewall) {
 
   sweepTimer = setInterval(sweepSessions, 60000);
   if (sweepTimer.unref) sweepTimer.unref();
+
+  // Settings changed in .env apply only after a restart; bring the ufw rules
+  // in line once things have settled.
+  requestUfwAutoApply('startup', UFW_AUTO_STARTUP_DELAY_MS);
 }
 
 // Answer a plaintext HTTP request that landed on the TLS port with a raw 301 to

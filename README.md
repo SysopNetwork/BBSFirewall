@@ -18,7 +18,7 @@ By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/S
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?logo=linux&logoColor=white)]()
 [![PM2](https://img.shields.io/badge/PM2-ready-2B037A?logo=pm2&logoColor=white)](https://pm2.keymetrics.io/)
 
-📋 **[See what's new in v1.4.0 →](CHANGELOG.md)**
+📋 **[See what's new in v1.5.0 →](CHANGELOG.md)** · 🔒 **[Security guide →](SECURITY.md)**
 
 </div>
 
@@ -29,12 +29,14 @@ By **[Sysop Network](https://github.com/SysopNetwork)** — https://github.com/S
 | | Feature | Description |
 |---|---|---|
 | 🔀 | **TCP Proxy** | Forwards telnet connections to a backend BBS server |
-| 🔒 | **SSH Server** | Encrypted SSH access on any port, proxied to the telnet backend |
+| 🔒 | **SSH** | Encrypted SSH access — answered by the firewall and proxied to the telnet backend, or passed through to a backend with its own SSH server |
 | 🌐 | **HTTPS Redirect** | Redirects both HTTP (port 80) and HTTPS (port 443) to a configured URL |
 | 🔑 | **Let's Encrypt** | Built-in cert setup script with auto-renewal, no downtime required |
 | 🛠️ | **Web Config Editor** | HTTPS admin UI (port 8443) to edit `.env` and IP lists; trusted-host + login gated |
 | 🔐 | **Two-Factor Auth** | TOTP authenticator app + one-time backup codes protect the admin UI, on top of scrypt-hashed passwords |
-| 📜 | **Log Viewer** | Browse, view, and delete per-proxy log files from the browser — automatically grouped by type, with anything older than 30 days folded into per-month sections |
+| 📜 | **Logs** | Search every log file at once, read any file with live follow, and download one file or all of them as a `.zip` — grouped by service, with older files folded into per-month sections |
+| 👥 | **Admin Roles** | Global Admin and Firewall Admin accounts — helpers can run the firewall day to day without being able to change who reaches the admin tools |
+| 🧱 | **Host Firewall (UFW)** | Keeps the host's own ufw rules in step with your settings, and copies blocked addresses into the kernel (Linux, optional) |
 | 📊 | **System Stats** | Live CPU, memory, disk, and bandwidth metrics for the running firewall process |
 | 🔌 | **Management API** | Key-authenticated REST API to automate firewall configuration from your own tooling |
 | 📡 | **PROXY Protocol v1** | Passes the real client IP to the backend BBS (requires compatible backend) |
@@ -293,8 +295,14 @@ Scan the first bytes a telnet/SSH caller sends for known bot / scanner / exploit
 <th>Description</th>
 <th width="170">Default</th>
 </tr>
-<tr><td><code>LOG_LEVEL</code></td><td>Log level: <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code></td><td><code>info</code></td></tr>
+<tr><td><code>LOG_LEVEL</code></td><td>Console log level: <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code></td><td><code>info</code></td></tr>
+<tr><td><code>LOG_FILE_ENABLED</code></td><td>Write daily log files, one folder per service</td><td><code>true</code></td></tr>
+<tr><td><code>LOG_DIR</code></td><td>Folder for the log files</td><td><code>./logs</code></td></tr>
+<tr><td><code>LOG_FILE_LEVEL</code></td><td>File log level: <code>off</code>, <code>blocked</code>, <code>connections</code> (also admin logins and changes), <code>info</code>, <code>debug</code></td><td><code>connections</code></td></tr>
+<tr><td><code>LOG_RETENTION_DAYS</code></td><td>Delete log files older than this (1–3650)</td><td><code>30</code></td></tr>
 </table>
+
+Each service can override the file level or switch its file off: <code>TELNET_</code>, <code>SSH_</code>, <code>SSH_PASSTHROUGH_</code>, <code>WEB_</code> and <code>CONFIG_EDITOR_</code> + <code>LOG_LEVEL</code> / <code>LOG_ENABLED</code>. See <code>.env.example</code>.
 
 ### 🔒 SSH Server
 
@@ -304,21 +312,46 @@ Scan the first bytes a telnet/SSH caller sends for known bot / scanner / exploit
 <th>Description</th>
 <th width="170">Default</th>
 </tr>
-<tr><td><code>SSH_ENABLED</code></td><td>Enable the SSH server</td><td><code>false</code></td></tr>
-<tr><td><code>SSH_LISTEN_PORT</code></td><td>Port to listen on for SSH connections</td><td><code>2222</code></td></tr>
-<tr><td><code>SSH_HOST_KEY</code></td><td>Path to SSH host private key file</td><td><code>./ssh_host_key</code></td></tr>
-<tr><td><code>SSH_CIPHERS</code></td><td>Comma-separated list of allowed SSH ciphers</td><td><em>(see below)</em></td></tr>
+<tr><td><code>SSH_MODE</code></td><td><code>off</code>, <code>terminate</code> (the firewall answers SSH and connects callers to the telnet backend) or <code>passthrough</code> (forwards the encrypted stream to a backend SSH server)</td><td><code>off</code></td></tr>
+<tr><td><code>SSH_LISTEN_PORT</code></td><td>Port callers use for SSH</td><td><code>2222</code></td></tr>
+<tr><td><code>SSH_HOST_KEY</code></td><td>Host private key file (terminate)</td><td><code>./ssh_host_key</code></td></tr>
+<tr><td><code>SSH_CIPHERS</code></td><td>Comma-separated list of allowed SSH ciphers (terminate)</td><td><em>(see below)</em></td></tr>
+<tr><td><code>SSH_BACKEND_HOST</code></td><td>Backend SSH server (passthrough)</td><td><code>BACKEND_HOST</code></td></tr>
+<tr><td><code>SSH_BACKEND_PORT</code></td><td>Backend SSH port (passthrough)</td><td><code>22</code></td></tr>
+<tr><td><code>SSH_PROXY_PROTOCOL</code></td><td>Send a PROXY header to the backend SSH server — only if it understands it (passthrough)</td><td><code>false</code></td></tr>
+</table>
+
+`SSH_ENABLED=true` from older versions still works and means `SSH_MODE=terminate`.
+
+### 🧱 Host Firewall (UFW)
+
+<table>
+<tr>
+<th width="270">Variable</th>
+<th>Description</th>
+<th width="170">Default</th>
+</tr>
+<tr><td><code>UFW_ENABLED</code></td><td>Let BBSFirewall manage its own tagged ufw rules (Preview / Apply in the Tools tab). Needs ufw installed and already turned on.</td><td><code>false</code></td></tr>
+<tr><td><code>HOST_ADMIN_SSH_PORT</code></td><td>The port <em>you</em> log in to the server on (not the BBS's SSH port). Required with <code>UFW_ENABLED</code>.</td><td><em>(empty)</em></td></tr>
+<tr><td><code>UFW_AUTO_APPLY</code></td><td>Apply rule changes automatically at startup and after each Save, instead of Preview + Apply</td><td><code>false</code></td></tr>
+<tr><td><code>UFW_PUSH_BLOCKS</code></td><td>Copy blocklist entries and trigger auto-blocks into ufw as kernel <code>deny</code> rules</td><td><code>false</code></td></tr>
+<tr><td><code>UFW_BLOCK_MAX_RULES</code></td><td>Most block rules to push (1–10000)</td><td><code>1000</code></td></tr>
 </table>
 
 ---
 
 ## 🔒 SSH Server
 
-BBSFirewall includes an optional SSH server that accepts any username and password and proxies the session to the backend BBS via telnet. This lets users connect with a modern SSH client instead of a raw telnet client.
+`SSH_MODE` picks what answers on the BBS's SSH port:
 
-### Setup
+- **`terminate`** — the firewall is the SSH server. It accepts any username and password and connects the caller to the BBS over telnet, so callers can use an SSH client even when the BBS has no SSH of its own. The BBS's own login screen is what protects accounts.
+- **`passthrough`** — the firewall only filters by IP and forwards the encrypted SSH stream to a backend that runs its own SSH server, so public-key logins and SFTP keep working end to end.
 
-Generate an SSH host key (only needed once):
+Every caller goes through the same checks as telnet (blocklist, rate limit, connection caps, country blocking) the moment it connects.
+
+### Terminate mode setup
+
+Generate an SSH host key (only needed once — or use the **Tools** tab):
 
 ```bash
 ssh-keygen -t rsa -b 4096 -f ssh_host_key -N "" -m PEM
@@ -327,7 +360,7 @@ ssh-keygen -t rsa -b 4096 -f ssh_host_key -N "" -m PEM
 Enable in `.env`:
 
 ```env
-SSH_ENABLED=true
+SSH_MODE=terminate
 SSH_LISTEN_PORT=22
 SSH_HOST_KEY=./ssh_host_key
 ```
@@ -336,6 +369,18 @@ Connect from any SSH client — any username and password works:
 
 ```bash
 ssh yourserver.example.com
+```
+
+The firewall answers the BBS's telnet option negotiation itself, so callers never see stray negotiation bytes, and binary transfers such as Zmodem pass through intact. Callers must finish logging in within 2 minutes.
+
+### Passthrough mode setup
+
+```env
+SSH_MODE=passthrough
+SSH_LISTEN_PORT=22
+SSH_BACKEND_HOST=127.0.0.1
+SSH_BACKEND_PORT=2222
+SSH_PROXY_PROTOCOL=false   # true only if the backend SSH server reads PROXY headers
 ```
 
 ### Default SSH Ciphers
@@ -347,7 +392,25 @@ Includes both modern and legacy ciphers for old terminal clients:
 - `aes128-cbc`, `aes192-cbc`, `aes256-cbc`
 - `3des-cbc` (for very old clients)
 
-> **Note:** Binary file transfers (Zmodem, Ymodem, etc.) do not work reliably over SSH due to PTY character processing. Use the telnet connection for file transfers and SSH for interactive browsing.
+---
+
+## 🧱 Host Firewall (UFW)
+
+On Linux, BBSFirewall can manage the host's own ufw rules, adding a kernel-level layer that keeps working while the firewall restarts. It is off by default and never turns ufw itself on or off.
+
+1. Install ufw, allow the port you log in on, and turn it on yourself:
+
+   ```bash
+   ufw allow 22/tcp     # your admin SSH port
+   ufw enable
+   ```
+
+2. Set `UFW_ENABLED=true` and `HOST_ADMIN_SSH_PORT`, restart, and open **Tools → Host firewall (UFW)**. **Preview** shows what would change; **Apply** makes it so. The BBS ports are opened to everyone, while the config editor and your admin SSH port are limited to Trusted Hosts. Apply refuses any change that would leave your admin SSH port without an allow rule. BBSFirewall only touches rules it tagged (`bbsfw`); your own rules are left alone.
+
+   With `UFW_AUTO_APPLY=true` the same changes are made automatically at startup and after each Save, so adding or removing a Trusted Host updates the rules right away. It is stricter than a manual Apply: if it can't tell which ports sshd listens on, or the change would remove more than half of the rules, it changes nothing and the Tools tab asks you to Preview and Apply yourself.
+3. Optionally set `UFW_PUSH_BLOCKS=true` to copy blocklist entries and trigger auto-blocks into ufw as `deny` rules (tagged `bbsfw-auto`). Anything overlapping Trusted Hosts, the Whitelist or localhost is never pushed, and pushing is refused while Trusted Hosts is empty. Turning it off leaves the rules in place; remove them with **Remove pushed rules** in the same card.
+
+> A cloud provider's own network firewall sits in front of ufw and is invisible to it. If ufw says a port is open but callers still can't connect, check the provider's firewall too.
 
 ---
 
@@ -459,14 +522,14 @@ from Security Settings, under your username in the top-right of the header.
 
 - **Settings** — the whole `.env`, grouped into collapsible sections with per-field help and a *more* toggle for longer explanations (e.g. SSH terminate vs passthrough).
 - **Lists** — the **Whitelist / Blocklist / Trusted Hosts / Triggers / API Trusted Hosts** editors, labeled by name, not filename, with "Add my IP" / "/24" / "/29" quick-add buttons on Whitelist and Blocklist.
-- **Tools** — one-click **download / update** of the MaxMind GeoIP database (needs `MAXMIND_LICENSE_KEY` saved), **generate an SSH host key** for terminate mode, **issue a Let's Encrypt certificate** for the editor or the port-443 redirect (installs certbot if missing; console output shown on success or failure), and **check for / apply updates** (see [Updating](#-updating) — Linux-only, restarts on success, automatic rollback on failure).
+- **Tools** — one-click **download / update** of the MaxMind GeoIP database (needs `MAXMIND_LICENSE_KEY` saved), **generate an SSH host key** for terminate mode, **issue a Let's Encrypt certificate** for the editor or the port-443 redirect (installs certbot if missing; console output shown on success or failure),, **check for / apply updates** or roll back to a backup (see [Updating](#-updating) — Linux-only, restarts on success, automatic rollback on failure), and manage **host firewall (UFW)** rules. Updates, rollback and UFW are Global Admin only.
 - **System Stats** — live CPU %, load average, memory, process RSS, disk, bandwidth (current/avg/peak), BBSFirewall folder and log-file disk usage, per-interface network throughput, and firewall counters (active connections, accepted/rejected, blocklist size, temp-blocked IPs). Auto-refreshes every 4s.
-- **Logs** — browse the per-proxy rotated log files written by `file-logger.js` (`LOG_FILE_ENABLED`, on by default — see Retention below). Files are grouped by proxy type, with anything older than 30 days automatically folded into per-month sections so a long-running board's log list stays readable instead of scrolling forever. View a file's content (large files are tailed to the last 512 KB) or permanently delete one.
+- **Logs** — browse the per-proxy rotated log files written by `file-logger.js` (`LOG_FILE_ENABLED`, on by default — see Retention below). Files are grouped by proxy type, with anything older than 30 days automatically folded into per-month sections so a long-running board's log list stays readable instead of scrolling forever. Search every file at once, open a file at any point (with **Follow** for today's file), download one file or all of them as a `.zip`, or delete one (Global Admin only).
 - **Security Settings** — under your username in the header: change your password, enable/disable MFA (TOTP QR code + one-time backup codes), regenerate backup codes, and whitelist your own IP.
 
 ### Behavior
 
-- **Save** writes `.env` after a timestamped backup into an `ENVBACKUPS/` folder next to `.env` (`.env.bak.<ISO>`, newest 15 kept), then validates the result in a fresh process. If validation fails the previous `.env` is restored and the errors are returned — the running config is never left broken.
+- **Save** writes `.env` (only when a setting actually changed) after a timestamped backup into an `ENVBACKUPS/` folder next to `.env` (`.env.bak.<ISO>`, newest 15 kept), then validates the result in a fresh process. A save that only changes lists leaves `.env` alone and needs no restart. If validation fails the previous `.env` is restored and the errors are returned — the running config is never left broken.
 - `.env` comments and layout are preserved; disabling an optional field comments its line out; new keys are appended under a marked block.
 - Editing `trustedhosts.txt` in the UI takes effect immediately (no restart). `.env` changes need a restart — the **Restart firewall** button runs `pm2 restart`, with a **Stay signed in after restart** checkbox: leave it checked and the page carries your session over and reconnects on its own; uncheck it to be logged out on restart.
 - Downloading/updating the GeoIP database and issuing the editor's own certificate both take effect live (no restart). Issuing the port-443 redirect certificate needs a restart.
@@ -685,6 +748,13 @@ BBSFirewall/
 ├── setup-admin.js         # One-time admin account creation (node setup-admin.js)
 ├── disable-mfa.js         # Emergency MFA disable (node disable-mfa.js --yes)
 ├── trustedhosts.js        # IPv4/IPv6 CIDR allowlist matching for the config editor
+├── telnet-filter.js       # Telnet client used by SSH terminate mode toward the BBS
+├── ufw.js                 # Host firewall (UFW) rule sync
+├── ufw-blocks.js          # Pushes blocked addresses into ufw
+├── file-logger.js         # Daily per-service log files, search, retention
+├── zip-stream.js          # Streams "download all logs" as a .zip
+├── updater.js             # Self-update and rollback engine
+├── update.js              # Command-line updater (node update.js)
 ├── metrics.js             # Shared live counters read by the config editor's System Stats tab
 ├── proxy-protocol.js      # PROXY Protocol v1 header builder
 ├── config.js              # Configuration loading and validation
@@ -699,6 +769,8 @@ BBSFirewall/
 ├── ecosystem.config.js    # PM2 process config
 ├── package.json
 ├── API.md                 # Management API reference + sample code
+├── SECURITY.md            # Security guide for sysops + how to report a vulnerability
+├── CHANGELOG.md           # Release notes
 ├── .env.example           # Documented example configuration
 ├── whitelist.txt.example
 ├── blocklist.txt.example
@@ -715,6 +787,24 @@ BBSFirewall/
 BBSFirewall is developed and maintained by [Mark Laudenbach](https://github.com/laudenbachm) at [Sysop Network](https://github.com/SysopNetwork).
 
 Built on the foundation of [bbsfw](https://github.com/ryanfantus/bbsfw) by [Ryan Fantus](https://github.com/ryanfantus). Solid starting point — thanks for putting that together.
+
+---
+
+## 🔒 Security
+
+Running BBSFirewall on the open internet? Read the **[Security guide](SECURITY.md)** —
+how to lock down the admin editor, accounts and MFA, the API, SSH and PROXY Protocol,
+and the server itself. Found a vulnerability? Please report it privately as described
+there, not in a public issue.
+
+---
+
+## Tips / Donations
+
+If BBSFirewall is useful to you, tips are appreciated:
+
+- **Cash App:** https://cash.app/$laudenbachm
+- **Ko-fi:** https://ko-fi.com/laudenbachm
 
 ---
 

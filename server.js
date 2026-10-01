@@ -103,6 +103,11 @@ class BBSFirewall {
 
     logger.info('Configuration:', configLog);
 
+    if (config.ufw.limitAdminSshIgnored) {
+      logger.warn('UFW_LIMIT_ADMIN_SSH is no longer supported and is ignored: the admin SSH port ' +
+        'gets a plain allow rule for Trusted Hosts. Remove the line from .env.');
+    }
+
     this.server = net.createServer((clientSocket) => {
       this.handleNewConnection(clientSocket, config.backendHost, config.backendPort, {
         proxyName: 'telnet',

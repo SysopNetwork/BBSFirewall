@@ -225,7 +225,6 @@ function desiredRules(config, opts) {
   const trustedHosts = (opts && opts.trustedHosts) || []; // config editor scope - array of {raw} from trustedhosts.js
   const adminTrustedHosts = (opts && opts.adminTrustedHosts) || trustedHosts.filter((h) => !isLoopback(h));
   const adminPort = opts && opts.adminSshPort;
-  const limitAdminSsh = !!(opts && opts.limitAdminSsh);
 
   const rules = [];
   const allowAnywhere = (port) => {
@@ -258,7 +257,7 @@ function desiredRules(config, opts) {
     else scopedTo(config.configEditor.port, 'ALLOW', editor.hosts);
   }
   if (adminPort) {
-    scopedTo(adminPort, limitAdminSsh ? 'LIMIT' : 'ALLOW', adminTrustedHosts);
+    scopedTo(adminPort, 'ALLOW', adminTrustedHosts);
   }
 
   // Default true so existing callers/tests that don't pass this keep working -

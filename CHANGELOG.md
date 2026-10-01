@@ -21,6 +21,12 @@ entry — see the git history for changes before v1.3.5.
   refuses to push at all with an empty Trusted Hosts list. Capped by
   `UFW_BLOCK_MAX_RULES` (default 1000). Status, "Sync now" and "Remove pushed
   rules" live in the Tools tab.
+- **UFW auto-apply** (`UFW_AUTO_APPLY`, off by default). Applies the host firewall
+  rule changes automatically at startup and after each Save, so adding or removing
+  a Trusted Host updates ufw right away instead of waiting for Preview + Apply.
+  Uses the same checks as Apply, and is stricter: if it can't tell which ports sshd
+  listens on, or the change would remove more than half of the rules, it changes
+  nothing and the Tools tab shows why. The last run's result is shown in the Tools tab.
 - **Log search** (Logs tab and `GET /api/logs/search`). Search every log file at
   once by text, type, level and date range — every word must match, `"quotes"`
   for a phrase, `-word` to exclude. Newest matches first, terms highlighted;
@@ -37,6 +43,9 @@ entry — see the git history for changes before v1.3.5.
 
 ### 🔒 Security
 
+- **New [security guide](SECURITY.md)** for sysops: locking down the admin editor,
+  accounts and MFA, the Management API, SSH modes, PROXY Protocol, ufw and the
+  server itself, plus how to report a vulnerability privately.
 - **Firewall Admin accounts can no longer change who can reach the editor.** The
   Config Editor, Management API and Host Firewall (UFW) settings, every list-file
   path, and the Trusted Hosts / API / Status allowlists are now Global Admin only —
@@ -56,9 +65,31 @@ entry — see the git history for changes before v1.3.5.
 - A role name that isn't recognised now gets the least access, not the most.
 - Trigger regexes with repeated alternation `(a|aa)+` or nested groups `((a+))+`
   are now refused as catastrophic-backtracking risks, like `(a+)+` already was.
+- **Installing updates, rolling back, deleting log files and replacing the SSH
+  host key are now Global Admin only.** A Firewall Admin could install an older
+  release that didn't have the role rules above, and get around them that way.
+- **SSH (terminate mode) now checks callers the moment they connect.** The
+  blocklist, rate limit, per-IP and global caps, country block and idle timeout
+  used to apply only once a caller had sent its SSH banner, so a caller that
+  connected and stayed silent was never checked or timed out. Blocked callers
+  are now dropped straight away, and every caller must finish logging in
+  within 2 minutes.
+- SSH (terminate mode): a caller that trips an auto-block trigger is now
+  disconnected completely. Before, only that shell closed and the same
+  connection could open a new one straight to the BBS.
+- The SSH banner no longer names the SSH library and its version, and a
+  caller can no longer send an unlimited number of environment variables.
+- **Admin logins and admin changes are now always in the log file.**
+  Successful logins, saved settings, GeoIP downloads, SSH host key changes,
+  ufw block syncs and "Whitelist my IP" used to be logged only at the `info`
+  level, so by default there was no record of who logged in or changed what.
 
 ### 🐛 Fixed
 
+- The Tools tab's update **Backups** list (with **Roll back to this**) is now
+  always shown to a Global Admin, with a note when there are no backups yet —
+  one is saved each time **Update now** runs. It also no longer disappears
+  when the GitHub update check fails.
 - **Saving no longer drops auto-blocks.** Save used to rewrite every list file
   from what the page loaded, silently deleting trigger auto-blocks (and "Whitelist
   my IP") added since. Only lists you actually edited are written now, keeping any
@@ -119,6 +150,18 @@ entry — see the git history for changes before v1.3.5.
 - The self-updater compared versions by splitting on dots only, so a pre-release
   like `1.5.0-beta.1` counted as *newer* than `1.5.0` and would never have been
   offered the final release. Pre-release tags now sort before their release.
+- Saving only a list (Trusted Hosts, Blocklist, …) no longer rewrites `.env` or makes
+  a `.env` backup. Each such save used to add an identical backup, pushing out the
+  older ones worth keeping. The Save message now asks for a restart only when a
+  setting actually changed; list changes take effect immediately.
+
+### 🗑️ Removed
+
+- **`UFW_LIMIT_ADMIN_SSH`** (rate-limit the admin SSH port with `ufw limit`). The
+  admin SSH port is already limited to Trusted Hosts, and ufw's fixed limit of
+  6 connections in 30 seconds locked admins out during ordinary reconnects. A
+  leftover `UFW_LIMIT_ADMIN_SSH=true` is ignored with a warning at startup, and
+  the admin port gets plain allow rules at the next Apply.
 
 ## v1.4.0 — 2026-09-23
 
