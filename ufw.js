@@ -90,20 +90,20 @@ function hasIpv6Support() {
 // ---------------------------------------------------------------------------
 // `ufw status numbered` parsing
 //
-// Real `ufw status numbered` output (ufw 0.36.2) this was built and verified
-// against - column widths vary, but columns are always separated by
-// 2+ spaces while values within a column (e.g. "728/tcp", "LIMIT IN") never
+// Real `ufw status numbered` output (ufw 0.36.2, example addresses and ports)
+// this was built and verified against - column widths vary, but columns are always separated by
+// 2+ spaces while values within a column (e.g. "2222/tcp", "LIMIT IN") never
 // contain a run of 2+ spaces, which is what the split below relies on:
 //
 //   Status: active
 //
 //        To                         Action      From
 //        --                         ------      ----
-//   [ 1] 728/tcp                    LIMIT IN    172.56.0.0/16              # bbsfw
-//   [ 2] 728/tcp                    LIMIT IN    172.58.0.0/16              # bbsfw
+//   [ 1] 2222/tcp                   LIMIT IN    203.0.113.0/24             # bbsfw
+//   [ 2] 2222/tcp                   LIMIT IN    198.51.100.0/24            # bbsfw
 //   [ 3] 23/tcp                     ALLOW IN    Anywhere                   # bbsfw
-//   [ 4] 8443/tcp                   ALLOW IN    172.56.0.0/16              # bbsfw
-//   [ 5] 8443/tcp                   ALLOW IN    172.58.0.0/16              # bbsfw
+//   [ 4] 8443/tcp                   ALLOW IN    203.0.113.0/24             # bbsfw
+//   [ 5] 8443/tcp                   ALLOW IN    198.51.100.0/24            # bbsfw
 //   [ 6] 23/tcp (v6)                ALLOW IN    Anywhere (v6)              # bbsfw
 //
 // ufw appends " (v6)" to BOTH the To and From columns for an
