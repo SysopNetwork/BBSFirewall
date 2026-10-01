@@ -245,10 +245,13 @@ function desiredRules(config, opts) {
   };
 
   // Public listeners - reachable by anyone, same as the app itself allows.
-  allowAnywhere(config.listenPort); // telnet
-  if (config.sshMode && config.sshMode !== 'off') allowAnywhere(config.sshListenPort);
-  if (config.webRedirectEnabled) allowAnywhere(80);
-  if (config.httpsRedirectEnabled) allowAnywhere(config.httpsRedirectPort || 443);
+  // Never the admin SSH port: validateConfig() refuses a public port that
+  // matches it, and this keeps "Anywhere" off that port even if one slips by.
+  const publicPort = (port) => { if (port !== adminPort) allowAnywhere(port); };
+  publicPort(config.listenPort); // telnet
+  if (config.sshMode && config.sshMode !== 'off') publicPort(config.sshListenPort);
+  if (config.webRedirectEnabled) publicPort(80);
+  if (config.httpsRedirectEnabled) publicPort(config.httpsRedirectPort || 443);
 
   // Admin-facing surfaces - scoped to trusted networks, not the world.
   if (config.configEditor && config.configEditor.enabled) {

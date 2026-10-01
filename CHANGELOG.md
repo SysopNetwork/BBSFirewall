@@ -78,7 +78,13 @@ entry — see the git history for changes before v1.3.5.
   disconnected completely. Before, only that shell closed and the same
   connection could open a new one straight to the BBS.
 - The SSH banner no longer names the SSH library and its version, and a
-  caller can no longer send an unlimited number of environment variables.
+  caller can no longer send an unlimited number of environment variables or
+  open more than 4 session channels at once on one connection.
+- **With UFW management on, a public port can no longer share the admin SSH
+  port.** Setting e.g. `HTTPS_REDIRECT_PORT` to the admin SSH port made the ufw
+  rules open that port to everyone — and a Firewall Admin can change those
+  ports. Such a setting is now refused, and the admin SSH port is never opened
+  to Anywhere.
 - **Admin logins and admin changes are now always in the log file.**
   Successful logins, saved settings, GeoIP downloads, SSH host key changes,
   ufw block syncs and "Whitelist my IP" used to be logged only at the `info`

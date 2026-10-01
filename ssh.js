@@ -55,6 +55,9 @@ function shouldBlockByCountry(config, ipAddress) {
 const LOGIN_GRACE_MS = 120000;
 // SSH "env" requests accepted per session; a normal client sends a handful.
 const MAX_ENV_VARS = 64;
+// Session channels open at once per connection. A BBS client uses one; each
+// accepted channel holds memory, and ssh2 itself allows billions.
+const MAX_SESSIONS = 4;
 
 // Drop a caller outright (blocked, timed out, or tripped a trigger).
 function dropSocket(socket) {
@@ -122,6 +125,7 @@ function createSSHServer(config, tracker) {
       // single caller (any credentials, one per-IP slot) open unlimited BBS
       // sessions.
       let shellOpen = false;
+      let sessionsOpen = 0;
 
       client.on('authentication', (ctx) => {
         log.info(`SSH auth from ${clientIP} (user: ${ctx.username})`);
@@ -145,7 +149,14 @@ function createSSHServer(config, tracker) {
             return;
           }
 
+          if (sessionsOpen >= MAX_SESSIONS) {
+            log.blocked(`SSH client ${clientIP}: refused session channel (${MAX_SESSIONS} already open)`);
+            if (typeof reject === 'function') reject();
+            return;
+          }
+          sessionsOpen++;
           const session = accept();
+          session.once('close', () => { sessionsOpen--; });
 
           let detectedEncoding = 'cp437';
           let sshEnv = {};

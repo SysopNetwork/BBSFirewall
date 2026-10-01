@@ -418,6 +418,19 @@ function validateConfig() {
       errors.push('HOST_ADMIN_SSH_PORT is required when UFW_ENABLED is true');
     } else if (config.ufw.adminSshPort < 1 || config.ufw.adminSshPort > 65535) {
       errors.push('HOST_ADMIN_SSH_PORT must be between 1 and 65535');
+    } else {
+      // Every public listener gets "allow from Anywhere" in ufw. One sharing
+      // the admin SSH port would open it to the whole internet - and a
+      // Firewall Admin can change these ports, while the admin port's scope is
+      // Global Admin only.
+      const admin = config.ufw.adminSshPort;
+      const publicPorts = [['LISTEN_PORT', config.listenPort]];
+      if (config.sshMode && config.sshMode !== 'off') publicPorts.push(['SSH_LISTEN_PORT', config.sshListenPort]);
+      if (config.webRedirectEnabled) publicPorts.push(['the HTTP redirect (port 80)', 80]);
+      if (config.httpsRedirectEnabled) publicPorts.push(['HTTPS_REDIRECT_PORT', config.httpsRedirectPort || 443]);
+      for (const [name, port] of publicPorts) {
+        if (port === admin) errors.push(`${name} must differ from HOST_ADMIN_SSH_PORT (${admin})`);
+      }
     }
   }
   if (config.ufw.pushBlocks && !config.ufw.enabled) {
