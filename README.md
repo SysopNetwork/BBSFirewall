@@ -1,17 +1,6 @@
 <div align="center">
 
-```
-       ██████╗ ██████╗ ███████╗    ███████╗██╗██████╗ ███████╗██╗    ██╗ █████╗ ██╗     ██╗
-       ██╔══██╗██╔══██╗██╔════╝    ██╔════╝██║██╔══██╗██╔════╝██║    ██║██╔══██╗██║     ██║
-       ██████╔╝██████╔╝███████╗    █████╗  ██║██████╔╝█████╗  ██║ █╗ ██║███████║██║     ██║
-       ██╔══██╗██╔══██╗╚════██║    ██╔══╝  ██║██╔══██╗██╔══╝  ██║███╗██║██╔══██║██║     ██║
-       ██████╔╝██████╔╝███████║    ██║     ██║██║  ██║███████╗╚███╔███╔╝██║  ██║███████╗███████╗
-       ╚═════╝ ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝
-```
-
-<img width="1910" height="997" alt="BBSFirewall config editor login screen" src="https://github.com/user-attachments/assets/2dc405c8-ad05-4029-9bff-d9ee4e176ee1" />
-
-https://youtu.be/gSbNv_pjzWY?si=bbbsoTLS9QL4ZygC
+<img width="1280" height="640" alt="bf" src="https://github.com/user-attachments/assets/f18aa6c4-40ef-4a5f-8dd3-47509757d376" />
 
 **A lightweight TCP proxy firewall for BBS telnet connections, built with Node.js.**
 
