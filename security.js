@@ -11,7 +11,7 @@
  * The store holds an ARRAY of admin accounts (`{accounts:[...]}`), each with
  * its own password hash, MFA secret/backup codes, a coarse `role`
  * ('master_admin' or 'firewall_admin'), and an `mfaRequired` policy flag -
- * see [[roadmap-hosted-platform]] item 4 / v1.4. A pre-multi-admin store is a
+ * added in v1.4. A pre-multi-admin store is a
  * single account object (`{username,password,...}` with no `accounts`
  * array); `loadStore()` migrates it to `{accounts:[that account,
  * role:'master_admin']}` on first read and persists the migration, so an

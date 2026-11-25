@@ -3,6 +3,19 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
+## v1.5.1 — Unreleased
+
+### 🐛 Fixed
+
+- **Two listeners can no longer be given the same port.** Settings are checked
+  across every enabled listener (telnet, SSH, the HTTP redirect on port 80, the
+  HTTPS redirect and the config editor). Before, most clashes (such as the HTTPS
+  redirect on the config editor's port) saved fine, and then one of the two
+  failed to start after the restart. If your current settings already contain a
+  clash, BBSFirewall now names both settings and refuses to start until it's fixed.
+- **No more false "pm2 restart failed" error** in the log after a successful
+  Restart or Update from the config editor. Real restart failures are still logged.
+
 ## v1.5.0 — 2026-09-30
 
 ### ✨ Added

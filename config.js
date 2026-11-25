@@ -337,12 +337,6 @@ function validateConfig() {
     if (ce.port < 1 || ce.port > 65535) {
       errors.push('CONFIG_EDITOR_PORT must be between 1 and 65535');
     }
-    if (ce.port === config.listenPort) {
-      errors.push('CONFIG_EDITOR_PORT must differ from LISTEN_PORT');
-    }
-    if (config.sshMode !== 'off' && ce.port === config.sshListenPort) {
-      errors.push('CONFIG_EDITOR_PORT must differ from SSH_LISTEN_PORT');
-    }
     if (!security.secretsExist()) {
       errors.push('No admin account configured for the config editor — run "node setup-admin.js" first');
     }
@@ -356,6 +350,19 @@ function validateConfig() {
       errors.push('CONFIG_EDITOR_SESSION_TIMEOUT_MS must be at least 60000');
     }
   }
+
+  // No two enabled listeners may share a port: the second one would fail to
+  // start after the restart, long after Save reported success.
+  const listeners = [['LISTEN_PORT', config.listenPort]];
+  if (config.sshMode !== 'off') listeners.push(['SSH_LISTEN_PORT', config.sshListenPort]);
+  if (config.webRedirectEnabled) listeners.push(['the HTTP redirect (port 80)', 80]);
+  if (config.httpsRedirectEnabled) listeners.push(['HTTPS_REDIRECT_PORT', config.httpsRedirectPort]);
+  if (config.configEditor.enabled) listeners.push(['CONFIG_EDITOR_PORT', config.configEditor.port]);
+  listeners.forEach(([name, port], i) => {
+    for (const [other, otherPort] of listeners.slice(0, i)) {
+      if (port === otherPort) errors.push(`${name} must differ from ${other} (both use port ${port})`);
+    }
+  });
 
   if (!Number.isInteger(config.backendConnectTimeout) || config.backendConnectTimeout < 0) {
     errors.push('BACKEND_CONNECT_TIMEOUT_MS must be 0 (disabled) or a positive integer');

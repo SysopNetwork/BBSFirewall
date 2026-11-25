@@ -1532,6 +1532,14 @@ function loadPersistedSessions() {
 // ---------------------------------------------------------------------------
 // /api/restart
 // ---------------------------------------------------------------------------
+// The pm2 command is a child of this process, and pm2 stops a whole process
+// tree - so a restart that WORKS ends our own pm2 command with a signal, which
+// execFile reports as an error. A real failure has an exit code instead, and
+// our own timeout sets `killed`.
+function stoppedByOwnRestart(err) {
+  return !err.killed && (err.signal === 'SIGINT' || err.signal === 'SIGTERM');
+}
+
 async function handleRestart(req, res, session) {
   if (!acquire(res, 'restart')) return;
   const name = config.configEditor.pm2AppName || 'bbsfirewall';
@@ -1581,7 +1589,7 @@ async function handleRestart(req, res, session) {
   // Fire after the response has flushed — this also restarts the editor itself.
   setTimeout(() => {
     execFile('pm2', ['restart', name, '--update-env'], { timeout: 20000 }, (err) => {
-      if (err) {
+      if (err && !stoppedByOwnRestart(err)) {
         log.error(`pm2 restart failed: ${err.message}`);
         release('restart'); // let the admin try again; we did not actually restart
       }
@@ -1590,8 +1598,8 @@ async function handleRestart(req, res, session) {
 }
 
 // ---------------------------------------------------------------------------
-// /api/reboot — Global Admin only, full OS-level reboot (v1.4,
-// [[roadmap-hosted-platform]] item 5). Meaningfully higher blast radius than
+// /api/reboot — Global Admin only, full OS-level reboot (v1.4).
+// Meaningfully higher blast radius than
 // /api/restart above: that one restarts the pm2 process, which is always
 // SSH-recoverable within seconds; this one reboots the whole host, which is
 // unreachable for minutes and — if pm2 doesn't actually resurrect
@@ -2234,7 +2242,7 @@ function restartAfterUpdate(req, keepSession) {
   }
   setTimeout(() => {
     execFile('pm2', ['restart', name, '--update-env'], { timeout: 20000 }, (err) => {
-      if (err) {
+      if (err && !stoppedByOwnRestart(err)) {
         log.error(`pm2 restart after update failed: ${err.message}`);
         release('update'); // let the admin try again; the code was already updated on disk
       }
@@ -2986,7 +2994,7 @@ async function handleMfaRegenerateBackupCodes(req, res, session) {
 
 // ---------------------------------------------------------------------------
 // /api/security/accounts* — master_admin-only admin-account management
-// (v1.4, [[roadmap-hosted-platform]] item 4). A 'firewall_admin' account
+// (v1.4). A 'firewall_admin' account
 // manages only its OWN password/MFA above; only 'master_admin' ("Global
 // Admin" in the UI) can see, add, or remove OTHER admin accounts.
 // Browser session lane only, same as the rest of /api/security/*.
