@@ -3,7 +3,7 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
-## v1.5.1 — Unreleased
+## v1.5.1 — 2026-11-24
 
 ### 🐛 Fixed
 
