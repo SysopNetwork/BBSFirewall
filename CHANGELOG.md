@@ -3,6 +3,18 @@
 All notable changes to BBSFirewall are documented here. This is the first tracked
 entry — see the git history for changes before v1.3.5.
 
+## v1.5.2 — Unreleased
+
+### 🐛 Fixed
+
+- **Renewing one certificate no longer sets off the hooks for every other one.**
+  Each certbot renewal hook now acts only on its own certificate, so a renewal
+  restarts BBSFirewall once. Hooks installed by an older version are updated when
+  BBSFirewall starts.
+- **Certificate runs from the Tools tab finish even if BBSFirewall restarts
+  part-way through.** Before, reissuing a certificate could restart BBSFirewall
+  mid-run and kill certbot.
+
 ## v1.5.1 — 2026-11-24
 
 ### 🐛 Fixed

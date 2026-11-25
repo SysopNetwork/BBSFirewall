@@ -30,7 +30,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { promisify } = require('util');
-const { execFile, execFileSync } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 const execFileAsync = promisify(execFile);
 const dotenv = require('dotenv');
 
@@ -1706,6 +1706,59 @@ function runAction(file, args, opts, cb) {
   });
 }
 
+// Like runAction, but the command is not left as a child of this process: pm2
+// stops a whole process tree, so a restart part-way through (another admin, a
+// renewal hook) would otherwise kill certbot with it. The launcher shell exits
+// at once, and the exit code comes back through a file.
+const DETACHED_LAUNCHER = 'd=$1; shift; ' +
+  '( "$@" >"$d/out" 2>&1 </dev/null; echo $? >"$d/rc.tmp"; mv "$d/rc.tmp" "$d/rc" ) &';
+
+function runDetachedAction(file, args, opts, cb) {
+  if (process.platform === 'win32') return runAction(file, args, opts, cb);
+  const started = Date.now();
+  const timeout = (opts && opts.timeout) || ACTION_TIMEOUT_MS;
+  let dir = null;
+  let child = null;
+  let timer = null;
+  let finished = false;
+  const finish = (exitCode, timedOut, error) => {
+    if (finished) return;
+    finished = true;
+    clearInterval(timer);
+    let output = error || '';
+    try { output = fs.readFileSync(path.join(dir, 'out'), 'utf8') + output; } catch (_) {}
+    try { if (dir) fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+    cb({
+      ok: exitCode === 0,
+      exitCode,
+      timedOut,
+      ms: Date.now() - started,
+      output: output.replace(/\x1b\[[0-9;]*m/g, '').trim(),
+    });
+  };
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bbsfw-action-'));
+    child = spawn('sh', ['-c', DETACHED_LAUNCHER, 'sh', dir, file, ...args], {
+      cwd: __dirname,
+      detached: true, // own process group, so a timeout can stop all of it
+      stdio: 'ignore',
+      env: { ...process.env, DOTENV_CONFIG_QUIET: 'true', ...(opts && opts.env) },
+    });
+  } catch (err) {
+    return finish(-1, false, err.message);
+  }
+  child.on('error', (err) => finish(-1, false, err.message));
+  timer = setInterval(() => {
+    let rc = '';
+    try { rc = fs.readFileSync(path.join(dir, 'rc'), 'utf8').trim(); } catch (_) {}
+    if (rc) return finish(Number(rc), false);
+    if (Date.now() - started > timeout) {
+      try { process.kill(-child.pid, 'SIGTERM'); } catch (_) {}
+      finish(-1, true, '\nTimed out.');
+    }
+  }, 300);
+}
+
 // ---------------------------------------------------------------------------
 // /api/geoip  { action: 'download' | 'update' }
 // ---------------------------------------------------------------------------
@@ -1859,7 +1912,7 @@ async function handleCert(req, res, session) {
   if (email) args.push('--email', email);
 
   log.warn(`Let's Encrypt issuance for ${target} (${domain}) requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
-  runAction('bash', args, { timeout: ACTION_TIMEOUT_MS }, async (r) => {
+  runDetachedAction('bash', args, { timeout: ACTION_TIMEOUT_MS, env: { BBSFW_SKIP_RESTART: '1' } }, async (r) => {
     release('cert');
     if (r.ok) invalidateHealthCache();
     let reloaded = false;
@@ -3681,6 +3734,15 @@ function startConfigEditorServer(firewall) {
   // request doesn't pay for the pm2/certbot presence check.
   hasPm2().catch(() => {});
   hasCertbot().catch(() => {});
+
+  // Certbot hooks installed by an older version restart on every renewal,
+  // whichever certificate it was. Hooks BBSFirewall did not write are left alone.
+  if (process.platform === 'linux' && process.getuid() === 0) {
+    execFile('bash', [path.join(__dirname, 'cert-hooks.sh'), 'refresh'], { timeout: 10000 }, (err, stdout) => {
+      if (err) log.warn(`Could not refresh the certbot renewal hooks: ${err.message}`);
+      else if (stdout.trim()) log.warn(stdout.trim());
+    });
+  }
 
   let tlsKey, tlsCert;
   try {
