@@ -146,17 +146,30 @@ fi
 
 # Renewal mode
 if [[ "$RENEW" == "true" ]]; then
-  info "Renewing all certificates..."
+  info "Renewing any certificates that are due..."
   bash "$BBSFW_DIR/cert-hooks.sh" refresh
-  certbot renew --webroot --webroot-path "$WEBROOT" --no-random-sleep-on-renew --quiet
+  # Each certificate renews the way it was set up (webroot or standalone);
+  # forcing --webroot here broke the standalone ones. The renewal hooks copy
+  # each renewed cert in but skip their own restart, so BBSFirewall restarts
+  # once at the end, and only if something was actually renewed.
+  RENEWED_MARK="$(mktemp -u /tmp/bbsfw-renewed.XXXXXX)"
+  RC=0
+  BBSFW_SKIP_RESTART=1 certbot renew --no-random-sleep-on-renew \
+    --deploy-hook "touch $RENEWED_MARK" || RC=$?
 
-  info "Restarting BBSFirewall to load renewed certificates..."
-  if command -v pm2 &>/dev/null; then
-    pm2 restart "$PM2_APP_NAME" --silent
-    ok "BBSFirewall restarted via pm2"
+  if [[ -e "$RENEWED_MARK" ]]; then
+    rm -f "$RENEWED_MARK"
+    info "Restarting BBSFirewall to load the renewed certificates..."
+    if command -v pm2 &>/dev/null; then
+      pm2 restart "$PM2_APP_NAME" --silent
+      ok "BBSFirewall restarted via pm2"
+    else
+      warn "pm2 not found â€” restart BBSFirewall manually to load the new cert"
+    fi
   else
-    warn "pm2 not found — restart BBSFirewall manually to load the new cert"
+    info "Nothing was renewed, so no restart is needed."
   fi
+  [[ "$RC" -eq 0 ]] || die "certbot reported a renewal failure (exit $RC) â€” see its output above"
   ok "Renewal complete"
   exit 0
 fi
@@ -201,13 +214,24 @@ fi
 bash "$BBSFW_DIR/cert-hooks.sh" install editor
 HOOK_FILE="/etc/letsencrypt/renewal-hooks/deploy/bbsfirewall-config-editor-reload.sh"
 
+CERT_DIR="/etc/letsencrypt/live/bbsfirewall-config-editor"
+# live/ links to the newest archive copy; if the link target is unchanged after
+# certbot, it kept the existing certificate ("not yet due for renewal").
+BEFORE="$(readlink -f "$CERT_DIR/fullchain.pem" 2>/dev/null || true)"
+
 info "Running certbot..."
 certbot "${CERTBOT_ARGS[@]}"
 
-CERT_DIR="/etc/letsencrypt/live/bbsfirewall-config-editor"
 [[ -f "$CERT_DIR/fullchain.pem" ]] || die "Certificate not found at $CERT_DIR — certbot may have failed"
 [[ -f "$CERT_DIR/privkey.pem"   ]] || die "Private key not found at $CERT_DIR — certbot may have failed"
-ok "Certificate issued to $CERT_DIR"
+EXPIRES="$(openssl x509 -noout -enddate -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2 || true)"
+if [[ -n "$BEFORE" && "$BEFORE" == "$(readlink -f "$CERT_DIR/fullchain.pem")" ]]; then
+  ISSUED=false
+  ok "Existing certificate kept (expires ${EXPIRES:-unknown}). Certbot renews it within 30 days of expiry."
+else
+  ISSUED=true
+  ok "Certificate issued to $CERT_DIR (expires ${EXPIRES:-unknown})"
+fi
 
 # Copy into the editor's cert directory (copy, not symlink, so BBSFirewall can
 # read them without root). The renewal hook keeps these copies current.
@@ -218,23 +242,31 @@ ok "Certificates copied to $EDITOR_CERTS_DIR"
 
 echo ""
 echo "  ======================================================"
-echo "  Config editor certificate issued successfully!"
+if [[ "$ISSUED" == "true" ]]; then
+  echo "  Config editor certificate issued successfully!"
+else
+  echo "  Config editor certificate is current. Nothing to renew yet."
+fi
 echo "  ======================================================"
 echo ""
-echo "  Add these lines to your .env:"
-echo ""
-echo -e "  ${GRN}CONFIG_EDITOR_ENABLED=true${NC}"
-echo -e "  ${GRN}CONFIG_EDITOR_PORT=8443${NC}"
-echo -e "  ${GRN}CONFIG_EDITOR_CERT_PATH=$EDITOR_CERTS_DIR/fullchain.pem${NC}"
-echo -e "  ${GRN}CONFIG_EDITOR_KEY_PATH=$EDITOR_CERTS_DIR/privkey.pem${NC}"
-echo ""
-echo "  Also set CONFIG_EDITOR_USERNAME / CONFIG_EDITOR_PASSWORD and populate"
-echo "  trustedhosts.txt with the IP(s) you will administer from."
-echo ""
-echo "  Then restart BBSFirewall:"
-echo ""
-echo "    pm2 restart $PM2_APP_NAME"
-echo ""
+# The Tools tab sets BBSFW_SKIP_RESTART: the editor is already set up there and
+# loads the certificate itself, so the first-time setup steps don't apply.
+if [[ -z "${BBSFW_SKIP_RESTART:-}" ]]; then
+  echo "  If this is a new setup, add these lines to your .env:"
+  echo ""
+  echo -e "  ${GRN}CONFIG_EDITOR_ENABLED=true${NC}"
+  echo -e "  ${GRN}CONFIG_EDITOR_PORT=8443${NC}"
+  echo -e "  ${GRN}CONFIG_EDITOR_CERT_PATH=$EDITOR_CERTS_DIR/fullchain.pem${NC}"
+  echo -e "  ${GRN}CONFIG_EDITOR_KEY_PATH=$EDITOR_CERTS_DIR/privkey.pem${NC}"
+  echo ""
+  echo "  Create the admin login with: node $BBSFW_DIR/setup-admin.js"
+  echo "  and list the IP(s) you will administer from in trustedhosts.txt."
+  echo ""
+  echo "  Then restart BBSFirewall:"
+  echo ""
+  echo "    pm2 restart $PM2_APP_NAME"
+  echo ""
+fi
 echo "  Renewal is automatic via certbot's timer; the hook at"
 echo "  $HOOK_FILE"
 echo "  copies the new cert and restarts BBSFirewall."

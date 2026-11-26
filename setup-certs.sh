@@ -97,18 +97,30 @@ fi
 # Renewal mode — just renew all existing certs and restart
 # ---------------------------------------------------------------------------
 if [[ "$RENEW" == "true" ]]; then
-  info "Renewing all certificates..."
+  info "Renewing any certificates that are due..."
   bash "$BBSFW_DIR/cert-hooks.sh" refresh
-  certbot renew --webroot --webroot-path "$WEBROOT" --no-random-sleep-on-renew --quiet
+  # Each certificate renews the way it was set up (webroot or standalone);
+  # forcing --webroot here broke the standalone ones. The renewal hooks copy
+  # each renewed cert in but skip their own restart, so BBSFirewall restarts
+  # once at the end, and only if something was actually renewed.
+  RENEWED_MARK="$(mktemp -u /tmp/bbsfw-renewed.XXXXXX)"
+  RC=0
+  BBSFW_SKIP_RESTART=1 certbot renew --no-random-sleep-on-renew \
+    --deploy-hook "touch $RENEWED_MARK" || RC=$?
 
-  info "Restarting BBSFirewall to load new certificates..."
-  if command -v pm2 &>/dev/null; then
-    pm2 restart "$PM2_APP_NAME" --silent
-    ok "BBSFirewall restarted via PM2"
+  if [[ -e "$RENEWED_MARK" ]]; then
+    rm -f "$RENEWED_MARK"
+    info "Restarting BBSFirewall to load the renewed certificates..."
+    if command -v pm2 &>/dev/null; then
+      pm2 restart "$PM2_APP_NAME" --silent
+      ok "BBSFirewall restarted via pm2"
+    else
+      warn "pm2 not found â€” restart BBSFirewall manually to load the new cert"
+    fi
   else
-    warn "PM2 not found — restart BBSFirewall manually to load the new cert"
+    info "Nothing was renewed, so no restart is needed."
   fi
-
+  [[ "$RC" -eq 0 ]] || die "certbot reported a renewal failure (exit $RC) â€” see its output above"
   ok "Renewal complete"
   exit 0
 fi
@@ -176,15 +188,25 @@ fi
 bash "$BBSFW_DIR/cert-hooks.sh" install redirect
 HOOK_FILE="/etc/letsencrypt/renewal-hooks/deploy/bbsfirewall-reload.sh"
 
+CERT_DIR="/etc/letsencrypt/live/bbsfirewall-web-redirect"
+# live/ links to the newest archive copy; if the link target is unchanged after
+# certbot, it kept the existing certificate ("not yet due for renewal").
+BEFORE="$(readlink -f "$CERT_DIR/fullchain.pem" 2>/dev/null || true)"
+
 info "Running certbot..."
 certbot "${CERTBOT_ARGS[@]}"
-
-CERT_DIR="/etc/letsencrypt/live/bbsfirewall-web-redirect"
 
 [[ -f "$CERT_DIR/fullchain.pem" ]] || die "Certificate not found at $CERT_DIR — certbot may have failed"
 [[ -f "$CERT_DIR/privkey.pem"   ]] || die "Private key not found at $CERT_DIR — certbot may have failed"
 
-ok "Certificate issued to $CERT_DIR"
+EXPIRES="$(openssl x509 -noout -enddate -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2 || true)"
+if [[ -n "$BEFORE" && "$BEFORE" == "$(readlink -f "$CERT_DIR/fullchain.pem")" ]]; then
+  ISSUED=false
+  ok "Existing certificate kept (expires ${EXPIRES:-unknown}). Certbot renews it within 30 days of expiry."
+else
+  ISSUED=true
+  ok "Certificate issued to $CERT_DIR (expires ${EXPIRES:-unknown})"
+fi
 
 # ---------------------------------------------------------------------------
 # Copy certs into the BBSFirewall certs directory
@@ -202,20 +224,28 @@ ok "Certificates copied to $CERTS_DIR"
 # ---------------------------------------------------------------------------
 echo ""
 echo "  ======================================================"
-echo "  Certificate issued successfully!"
+if [[ "$ISSUED" == "true" ]]; then
+  echo "  Certificate issued successfully!"
+else
+  echo "  Certificate is current. Nothing to renew yet."
+fi
 echo "  ======================================================"
 echo ""
-echo "  Add these lines to your .env file to enable HTTPS redirect:"
-echo ""
-echo -e "  ${GRN}HTTPS_REDIRECT_ENABLED=true${NC}"
-echo -e "  ${GRN}HTTPS_REDIRECT_PORT=443${NC}"
-echo -e "  ${GRN}HTTPS_CERT_PATH=$CERTS_DIR/fullchain.pem${NC}"
-echo -e "  ${GRN}HTTPS_KEY_PATH=$CERTS_DIR/privkey.pem${NC}"
-echo ""
-echo "  Then restart BBSFirewall:"
-echo ""
-echo "    pm2 restart $PM2_APP_NAME"
-echo ""
+# The Tools tab sets BBSFW_SKIP_RESTART and loads the certificate itself (or
+# says when a restart is needed), so the first-time setup steps don't apply.
+if [[ -z "${BBSFW_SKIP_RESTART:-}" ]]; then
+  echo "  If this is a new setup, add these lines to your .env to enable HTTPS redirect:"
+  echo ""
+  echo -e "  ${GRN}HTTPS_REDIRECT_ENABLED=true${NC}"
+  echo -e "  ${GRN}HTTPS_REDIRECT_PORT=443${NC}"
+  echo -e "  ${GRN}HTTPS_CERT_PATH=$CERTS_DIR/fullchain.pem${NC}"
+  echo -e "  ${GRN}HTTPS_KEY_PATH=$CERTS_DIR/privkey.pem${NC}"
+  echo ""
+  echo "  Then restart BBSFirewall:"
+  echo ""
+  echo "    pm2 restart $PM2_APP_NAME"
+  echo ""
+fi
 echo "  Renewal is automatic via certbot's built-in timer."
 echo "  The renewal hook at $HOOK_FILE"
 echo "  will copy the new cert and restart BBSFirewall for you."

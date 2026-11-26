@@ -1912,18 +1912,34 @@ async function handleCert(req, res, session) {
   if (email) args.push('--email', email);
 
   log.warn(`Let's Encrypt issuance for ${target} (${domain}) requested by "${sanitizeForLog(session.username)}" from ${clientIp(req)}`);
+  // The cert file the running listener loads. Comparing it before and after
+  // tells a real reissue apart from certbot's "not yet due for renewal" no-op,
+  // which also exits 0.
+  const certPath = target === 'editor'
+    ? (envFileValue('CONFIG_EDITOR_CERT_PATH') || config.configEditor.certPath)
+    : (envFileValue('HTTPS_CERT_PATH') || config.httpsCertPath);
+  const keyPath = target === 'editor'
+    ? (envFileValue('CONFIG_EDITOR_KEY_PATH') || config.configEditor.keyPath)
+    : (envFileValue('HTTPS_KEY_PATH') || config.httpsKeyPath);
+  const readCert = () => { try { return fs.readFileSync(path.resolve(certPath)); } catch (_) { return null; } };
+  const certBefore = readCert();
+
   runDetachedAction('bash', args, { timeout: ACTION_TIMEOUT_MS, env: { BBSFW_SKIP_RESTART: '1' } }, async (r) => {
     release('cert');
     if (r.ok) invalidateHealthCache();
-    let reloaded = false;
-    if (r.ok && target === 'editor') {
-      reloaded = reloadEditorCert();
-      r.output += reloaded
-        ? '\n\nNew certificate loaded into the running editor — no restart needed.'
-        : '\n\nCertificate issued. Restart to load it into the editor.';
-    }
-    if (r.ok && target === 'redirect') {
-      r.output += '\n\nCertificate issued. Restart the firewall to load it into the port-443 redirect.';
+    if (r.ok) {
+      const certAfter = readCert();
+      const label = target === 'editor' ? 'the editor' : 'the port-443 redirect';
+      if (certBefore && certAfter && certBefore.equals(certAfter)) {
+        r.output += `\n\nThe certificate did not change, so there was nothing new to load into ${label}.`;
+      } else {
+        const reloaded = target === 'editor'
+          ? reloadEditorCert()
+          : webRedirect.reloadHttpsCert(certPath, keyPath);
+        r.output += reloaded
+          ? `\n\nNew certificate loaded into ${label} — no restart needed.`
+          : `\n\nCertificate issued. Restart the firewall to load it into ${label}.`;
+      }
     }
     const health = await buildHealth();
     sendJson(res, r.ok ? 200 : 400, {

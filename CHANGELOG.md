@@ -14,6 +14,21 @@ entry — see the git history for changes before v1.3.5.
 - **Certificate runs from the Tools tab finish even if BBSFirewall restarts
   part-way through.** Before, reissuing a certificate could restart BBSFirewall
   mid-run and kill certbot.
+- **A new web redirect certificate is loaded without a restart.** Issuing one
+  from the Tools tab now swaps it into the running port-443 redirect, the same
+  way the editor's own certificate already was.
+- **Certificate runs say what actually happened.** When certbot keeps the
+  existing certificate because it isn't due for renewal yet, the output now
+  says so, with the expiry date, instead of reporting a new certificate. Runs
+  from the Tools tab no longer show the first-time `.env` setup steps, and the
+  old advice to set `CONFIG_EDITOR_USERNAME` / `CONFIG_EDITOR_PASSWORD` (replaced
+  by `setup-admin.js` in v1.3.5) is gone.
+- **`--renew` on the setup scripts no longer breaks standalone certificates.**
+  It used to force the webroot method onto every certificate on the box, so a
+  certificate set up with certbot's standalone method failed to renew. Each
+  certificate now renews the way it was set up, and BBSFirewall restarts once
+  at the end, only if something was actually renewed (it used to restart
+  once per renewed certificate and again afterwards).
 
 ## v1.5.1 — 2026-11-24
 

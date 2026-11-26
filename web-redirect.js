@@ -195,4 +195,22 @@ function stopWebRedirectServer() {
 function isHttpUp() { return !!(httpServer && httpServer.listening); }
 function isHttpsUp() { return !!(httpsServer && httpsServer.listening); }
 
-module.exports = { startWebRedirectServer, stopWebRedirectServer, isHttpUp, isHttpsUp };
+// Swap the running HTTPS listener onto a new certificate without a restart
+// (the Tools tab calls this after issuing one). Returns false when there is no
+// listener to swap: HTTPS redirect off, or it never started because the cert
+// was missing. Starting the listener for the first time still needs a restart.
+function reloadHttpsCert(certPath, keyPath) {
+  if (!isHttpsUp() || typeof httpsServer.setSecureContext !== 'function') return false;
+  try {
+    const key  = fs.readFileSync(path.resolve(keyPath  || config.httpsKeyPath));
+    const cert = fs.readFileSync(path.resolve(certPath || config.httpsCertPath));
+    httpsServer.setSecureContext({ key, cert });
+    log.info('HTTPS redirect: TLS certificate reloaded');
+    return true;
+  } catch (err) {
+    log.warn(`HTTPS redirect: cert reload failed — ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { startWebRedirectServer, stopWebRedirectServer, isHttpUp, isHttpsUp, reloadHttpsCert };
